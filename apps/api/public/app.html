@@ -4607,11 +4607,22 @@
               <select id="peerSubService" class="input" style="width:100%;margin:6px 0 12px">${data.services.map((service) => `<option value="${esc(service.id)}">${esc(service.name)} · ${esc(service.schedule)}</option>`).join("")}</select>
               <p id="peerSubDesc" class="muted" style="margin:0 0 12px;font-size:13px"></p>
               <div id="peerSubParams"></div>
+              <p id="peerSubError" role="alert" style="display:none;margin:12px 0 0;color:var(--danger,#d33);font-size:13px;line-height:1.5"></p>
               <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn btn-secondary" id="peerSubCancel">取消</button><button type="button" class="btn btn-primary" id="peerSubSave">确认订阅</button></div>`;
             host.appendChild(card);
             host.style.display = "flex";
             const close = () => { host.style.display = "none"; host.innerHTML = ""; };
             const serviceSelect = card.querySelector("#peerSubService");
+            const showError = (message) => {
+              const error = card.querySelector("#peerSubError");
+              error.textContent = message;
+              error.style.display = "block";
+            };
+            const clearError = () => {
+              const error = card.querySelector("#peerSubError");
+              error.textContent = "";
+              error.style.display = "none";
+            };
             const renderFields = () => {
               const service = data.services.find((item) => item.id === serviceSelect.value);
               card.querySelector("#peerSubDesc").textContent = (service.description || "") + (service.timezone ? ` · ${service.timezone}` : "");
@@ -4626,6 +4637,7 @@
                 return `<label class="field-label" style="display:block;margin:10px 0 0">${esc(label)}${suffix}${choices}</label>`;
               }).join("");
               card.querySelector("#peerSubParams").innerHTML = fields || '<p class="muted" style="margin:0">该服务无需填写参数。</p>';
+              clearError();
             };
             renderFields();
             serviceSelect.onchange = renderFields;
@@ -4642,7 +4654,7 @@
                 else params[input.dataset.peerSubParam] = value;
                 if ((service.paramsSchema?.required || []).includes(input.dataset.peerSubParam) && !value) valid = false;
               });
-              if (!valid) { toast("请填写必填订阅参数", true); return; }
+              if (!valid) { showError("请填写必填订阅参数。"); return; }
               // This sheet is already the explicit confirmation step. Opening
               // the global confirm sheet here would leave two modal backdrops
               // visible at once and make the action look broken.
@@ -4656,7 +4668,12 @@
               } catch (e) {
                 saveButton.disabled = false;
                 saveButton.textContent = "确认订阅";
-                toast(e.message || "订阅失败", true);
+                const message = e.message === "subscription_already_exists"
+                  ? "该用户在当前人设下已订阅此服务，无需重复创建。"
+                  : e.message === "service_not_available_for_persona"
+                    ? "当前人设已不再开放此订阅服务，请刷新后重试。"
+                    : e.message || "订阅失败，请稍后重试。";
+                showError(message);
               }
             };
           } catch (e) { toast(e.message || "无法获取可订阅服务", true); }

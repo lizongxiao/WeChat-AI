@@ -8600,6 +8600,7 @@
         const raw = String(reason || "");
         if (raw.startsWith("scheduled_output_invalid:")) return `生成结果不符合任务格式（${raw.slice(25)}）`;
         if (raw.startsWith("web_search_failed:")) return `联网查询失败（${raw.slice(18)}）`;
+        if (raw.startsWith("ilink_error")) return `微信发送失败（${raw.replace(/^ilink_error:?\s*/, "") || "接口错误"}）`;
         return {
           duplicate_execution_lock: "本分钟已推送过一次，请稍后再试",
           web_search_unavailable: "联网搜索未启用或工具网关不可用",

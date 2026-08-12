@@ -146,15 +146,13 @@ describe("scheduled prompt contract", () => {
     assert.match(fixed, /\n\n「今日寄语：/);
     assert.doesNotMatch(fixed, /「\n+今日寄语/);
     const chunks = splitScheduledBulletin(fixed);
-    assert.equal(chunks.length, 5, JSON.stringify(chunks));
+    assert.ok(chunks.length >= 8, JSON.stringify(chunks));
     assert.match(chunks[0]!, /夜里好/);
-    assert.match(chunks[1]!, /^🌤️/);
-    assert.match(chunks[1]!, /\n🌡️/);
-    const wear = chunks.find((c) => c.startsWith("👕"));
-    assert.ok(wear);
-    assert.match(wear!, /☂️/);
-    assert.equal(chunks[3], "「今日寄语：热气退一点，人也轻松一点。」");
-    assert.match(chunks[4]!, /还没睡/);
+    assert.equal(chunks.filter((c) => c.startsWith("🌤️")).length, 1);
+    assert.ok(chunks.some((c) => c.startsWith("🌡️") || c.startsWith("🌡")));
+    assert.ok(chunks.every((c) => !c.includes("\n")));
+    assert.ok(chunks.some((c) => c.includes("今日寄语")));
+    assert.match(chunks[chunks.length - 1]!, /还没睡/);
   });
 
   it("uses the overall length bound, not the 寄语 subsection bound", () => {

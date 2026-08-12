@@ -1094,16 +1094,17 @@ export class BotWorkerManager {
       client = new ILinkClient({ botToken: creds.botToken, baseUrl: creds.baseUrl ?? undefined });
     }
     try {
-      // Scheduled bulletins need every paragraph bubble; do not honor the
-      // global splitReply=false toggle (that would drop everything after part 0).
-      if (parts.length === 1) {
-        await this.sendReplyPart(client, peerId, contextToken, parts[0]!, reply.ownerUserId || "");
-      } else {
-        await this.sendHumanParts(client, peerId, contextToken, parts, reply.ownerUserId || "");
+      // Short fixed gaps: humanDelayMs scales with character count and can
+      // wait 5s+ before the weather block, which is the bubble most likely
+      // to contain newlines / fail. Do not honor splitReply=false.
+      const ownerUserId = reply.ownerUserId || "";
+      for (let i = 0; i < parts.length; i++) {
+        if (i > 0) await sleep(rand(280, 640));
+        await this.sendReplyPart(client, peerId, contextToken, parts[i]!, ownerUserId);
       }
       return { ok: true };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = formatScheduledSendError(err);
       this.opts.log?.(`[worker] scheduled reply failed bot=${botId} peer=${peerId}: ${message}`);
       return { ok: false, reason: "ilink_error", error: message };
     }
@@ -2776,6 +2777,16 @@ export class BotWorkerManager {
       // Do not fail the whole chain — skip this bubble
     }
   }
+}
+
+function formatScheduledSendError(err: unknown): string {
+  if (err instanceof ILinkError) {
+    const bits = [err.message || "iLink send failed"];
+    if (err.ret != null) bits.push(`ret=${err.ret}`);
+    if (err.errcode != null) bits.push(`errcode=${err.errcode}`);
+    return bits.join(" ");
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 function rand(a: number, b: number): number {

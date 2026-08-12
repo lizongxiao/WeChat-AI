@@ -649,14 +649,15 @@ export function normalizeScheduledLayout(text: string): string {
 }
 
 /**
- * Split a bulletin on blank lines so WeChat can show greeting / weather /
- * note / closing as separate bubbles (single-message newlines are unreliable).
+ * One WeChat bubble per non-empty line. iLink `text_item` does not reliably
+ * keep in-message newlines (they are flattened or the send is rejected), so
+ * weather fields must be separate sendmessage calls.
  */
 export function splitScheduledBulletin(text: string): string[] {
   const normalized = normalizeScheduledLayout(text);
   if (!normalized) return [];
   return normalized
-    .split(/\n{2,}/)
+    .split(/\n+/)
     .map((s) => s.trim())
     .filter(Boolean);
 }

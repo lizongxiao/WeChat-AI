@@ -55,10 +55,10 @@ export class ILinkError extends Error {
 }
 
 /**
- * iLink overloads ret=-2: stale context_token ("prepare failed" / "unknown
- * error"), and occasionally a real rate limit. Tokenless sendmessage is the
- * established recovery for proactive / cron pushes when the session token
- * has gone stale (errcode -14 is the documented sibling).
+ * iLink overloads ret=-2: stale/missing context_token ("prepare failed" /
+ * "unknown error" / empty errmsg), and occasionally a real rate limit.
+ * Tokenless sendmessage is not a recovery — outbound delivery requires a
+ * token from a recent inbound. errcode -14 is the documented sibling.
  */
 export function isStaleSessionError(err: unknown): boolean {
   if (!(err instanceof ILinkError)) return false;
@@ -80,8 +80,6 @@ export class ILinkClient {
   private typingTickets = new Map<string, TypingTicketEntry>();
   /** Collapses the burst of concurrent typing calls one reply produces */
   private typingTicketInflight = new Map<string, Promise<string | null>>();
-  /** Peers whose context_token was rejected; subsequent sends skip it. */
-  private staleContextPeers = new Set<string>();
   private typingTicketTtlMs: number;
   private typingTicketMaxEntries: number;
   private mediaMaxBytes: number;
@@ -163,43 +161,16 @@ export class ILinkClient {
     );
   }
 
-  /** Inbound message refreshed this peer's session; prefer context_token again. */
-  markContextFresh(toUserId: string): void {
-    const id = toUserId?.trim();
-    if (id) this.staleContextPeers.delete(id);
-  }
-
   /**
-   * POST /sendmessage. If context_token is stale (ret=-2 / -14), retry once
-   * without it — iLink accepts tokenless sends as a degraded fallback.
+   * POST /sendmessage. Always send the caller-supplied context_token.
+   * Omitting it also returns ret=-2 ("prepare failed") — iLink will not
+   * start a new conversation from a tokenless proactive push.
    */
   private async postSendMessage<T>(body: {
     msg: Record<string, unknown>;
     [key: string]: unknown;
   }): Promise<T> {
-    const peer = String(body.msg.to_user_id ?? "").trim();
-    const token = String(body.msg.context_token ?? "").trim();
-    const skipToken = Boolean(peer && this.staleContextPeers.has(peer));
-    const first = skipToken
-      ? { ...body, msg: { ...body.msg, context_token: "" } }
-      : body;
-    try {
-      return await this.postJson<T>("/ilink/bot/sendmessage", first);
-    } catch (err) {
-      if (skipToken || !token || !isStaleSessionError(err)) throw err;
-      const retried = await this.postJson<T>("/ilink/bot/sendmessage", {
-        ...body,
-        msg: { ...body.msg, context_token: "" },
-      });
-      if (peer) {
-        this.staleContextPeers.add(peer);
-        if (this.staleContextPeers.size > 2048) {
-          const firstKey = this.staleContextPeers.values().next().value;
-          if (firstKey) this.staleContextPeers.delete(firstKey);
-        }
-      }
-      return retried;
-    }
+    return this.postJson<T>("/ilink/bot/sendmessage", body);
   }
 
   /** Send text reply; context_token from inbound message is required. */
@@ -224,6 +195,7 @@ export class ILinkClient {
         context_token: params.contextToken,
         item_list: [{ type: 1, text_item: { text: params.text } }],
       },
+      base_info: { channel_version: this.channelVersion },
     });
   }
 

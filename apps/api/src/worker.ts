@@ -5,6 +5,7 @@ import {
   extractText,
   ILinkClient,
   ILinkError,
+  isStaleSessionError,
   isUserInbound,
   isVisionMime,
   mediaKindLabel,
@@ -89,6 +90,7 @@ import { ScheduledScheduler } from "./scheduled-scheduler.js";
 import { handleScheduledChatTool } from "./scheduled-chat-tools.js";
 import { emitActivity, previewText } from "./activity-stream.js";
 import { scheduledReplyParts } from "./scheduled-reply-delivery.js";
+import { newerContextToken } from "./scheduled-send-token.js";
 
 /**
  * How often a node sweeps the load-weight hash (refresh live entries, delete
@@ -1100,7 +1102,30 @@ export class BotWorkerManager {
       const ownerUserId = reply.ownerUserId || "";
       for (let i = 0; i < parts.length; i++) {
         if (i > 0) await sleep(rand(280, 640));
-        await this.sendReplyPart(client, peerId, contextToken, parts[i]!, ownerUserId);
+        const latest =
+          (await getContextToken(this.opts.db, botId, peerId)) || contextToken;
+        try {
+          await this.sendReplyPart(client, peerId, latest, parts[i]!, ownerUserId);
+        } catch (err) {
+          // iLink redelivers inbound with a new token. If Redis moved on,
+          // retry this bubble once with the newer token — never tokenless.
+          if (!isStaleSessionError(err)) throw err;
+          const refreshed = newerContextToken(
+            latest,
+            await getContextToken(this.opts.db, botId, peerId),
+          );
+          if (!refreshed) throw err;
+          this.opts.log?.(
+            `[worker] scheduled send retry with refreshed context_token peer=${peerId}`,
+          );
+          await this.sendReplyPart(
+            client,
+            peerId,
+            refreshed,
+            parts[i]!,
+            ownerUserId,
+          );
+        }
       }
       return { ok: true };
     } catch (err) {
@@ -2106,6 +2131,15 @@ export class BotWorkerManager {
     const contextToken = msg.context_token;
     if (!peerId || !contextToken) return;
 
+    // Persist before dedup / inbox-full drops. iLink redelivers the same
+    // content with a new context_token; keeping the old one makes the next
+    // scheduled / proactive send fail with prepare failed ret=-2.
+    try {
+      await upsertContextToken(this.opts.db, botId, peerId, contextToken);
+    } catch {
+      /* non-fatal */
+    }
+
     // With transcripts on (the default), extractText folds in iLink's own voice
     // transcript, so a voice note with one counts as text and never lands in the
     // media path. planInboundMedia is told the same thing so the two agree.
@@ -2285,7 +2319,6 @@ export class BotWorkerManager {
         job.peerId,
         job.contextToken,
       );
-      client.markContextFresh(job.peerId);
     } catch {
       /* non-fatal */
     }

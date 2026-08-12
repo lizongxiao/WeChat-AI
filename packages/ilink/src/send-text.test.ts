@@ -70,92 +70,36 @@ describe("isStaleSessionError", () => {
   });
 });
 
-describe("sendText stale context_token", () => {
-  it("retries once without context_token on prepare failed ret=-2", async () => {
-    const calls = installFetch((_path, body) => {
-      const msg = body.msg as { context_token?: string };
-      if (msg.context_token) {
-        return { body: { ret: -2, errcode: 0, errmsg: "prepare failed" } };
-      }
-      return { body: { ret: 0 } };
-    });
-
+describe("sendText", () => {
+  it("sends context_token and base_info", async () => {
+    const calls = installFetch(() => ({ body: { ret: 0 } }));
     await client().sendText({
       toUserId: "peer-1",
       text: "夜里好",
-      contextToken: "stale-token",
-    });
-
-    assert.equal(calls.length, 2);
-    const first = calls[0]!.body.msg as { context_token?: string };
-    const second = calls[1]!.body.msg as { context_token?: string };
-    assert.equal(first.context_token, "stale-token");
-    assert.equal(second.context_token, "");
-  });
-
-  it("skips the stale token on the next send to the same peer", async () => {
-    const calls = installFetch((_path, body) => {
-      const msg = body.msg as { context_token?: string };
-      if (msg.context_token) {
-        return { body: { ret: -2, errcode: 0, errmsg: "prepare failed" } };
-      }
-      return { body: { ret: 0 } };
-    });
-    const c = client();
-    await c.sendText({
-      toUserId: "peer-1",
-      text: "第一条",
-      contextToken: "stale-token",
-    });
-    await c.sendText({
-      toUserId: "peer-1",
-      text: "第二条",
-      contextToken: "stale-token",
-    });
-    assert.equal(calls.length, 3);
-    const third = calls[2]!.body.msg as { context_token?: string; item_list?: Array<{ text_item?: { text?: string } }> };
-    assert.equal(third.context_token, "");
-    assert.equal(third.item_list?.[0]?.text_item?.text, "第二条");
-  });
-
-  it("uses a fresh token again after markContextFresh", async () => {
-    let n = 0;
-    const calls = installFetch((_path, body) => {
-      n += 1;
-      const msg = body.msg as { context_token?: string };
-      if (n === 1 && msg.context_token) {
-        return { body: { ret: -2, errcode: 0, errmsg: "prepare failed" } };
-      }
-      return { body: { ret: 0 } };
-    });
-    const c = client();
-    await c.sendText({
-      toUserId: "peer-1",
-      text: "a",
-      contextToken: "stale",
-    });
-    c.markContextFresh("peer-1");
-    await c.sendText({
-      toUserId: "peer-1",
-      text: "b",
       contextToken: "fresh-token",
     });
-    const last = calls[calls.length - 1]!.body.msg as { context_token?: string };
-    assert.equal(last.context_token, "fresh-token");
+    assert.equal(calls.length, 1);
+    const body = calls[0]!.body;
+    const msg = body.msg as { context_token?: string };
+    assert.equal(msg.context_token, "fresh-token");
+    assert.deepEqual(body.base_info, { channel_version: "1.0.2" });
   });
 
-  it("does not retry a genuine rate-limit ret=-2", async () => {
-    installFetch(() => ({
-      body: { ret: -2, errcode: 0, errmsg: "frequency limit" },
+  it("does not retry without context_token on prepare failed ret=-2", async () => {
+    const calls = installFetch(() => ({
+      body: { ret: -2, errcode: 0, errmsg: "prepare failed" },
     }));
     await assert.rejects(
       () =>
         client().sendText({
           toUserId: "peer-1",
-          text: "hi",
-          contextToken: "tok",
+          text: "夜里好",
+          contextToken: "stale-token",
         }),
-      /frequency limit/,
+      /prepare failed/,
     );
+    assert.equal(calls.length, 1);
+    const msg = calls[0]!.body.msg as { context_token?: string };
+    assert.equal(msg.context_token, "stale-token");
   });
 });

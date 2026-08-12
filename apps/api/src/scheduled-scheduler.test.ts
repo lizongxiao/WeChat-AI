@@ -77,4 +77,14 @@ describe("scheduled cron matching", () => {
     assert.equal(kept.params.location, "上海");
     assert.deepEqual(kept.defaultsApplied, []);
   });
+
+  it("keeps cron preview helper for admin UI, separate from smoke-test wall clock", () => {
+    // Manual tests now use Date.now(); this helper remains for “下次执行” display.
+    const preview = scheduledPreviewTime(
+      "30 7 * * *",
+      "Asia/Shanghai",
+      new Date("2026-08-12T15:30:00.000Z"),
+    );
+    assert.equal(preview, "2026-08-12T23:30:00.000Z");
+  });
 });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildScheduledMessages,
+  normalizeScheduledLayout,
   scheduledOutputIssues,
 } from "./prompt.js";
 import {
@@ -39,6 +40,7 @@ describe("scheduled prompt contract", () => {
     assert.match(String(messages[0]?.content), /任务内容与格式要求优先于 Persona/);
     assert.match(String(messages[0]?.content), /2026-08-13 09:00/);
     assert.match(String(messages[0]?.content), /服务端已完成联网查询/);
+    assert.match(String(messages[0]?.content), /按该时刻自然问候/);
     assert.match(String(messages[0]?.content), /27~34℃/);
     assert.match(String(messages[0]?.content), /上海今日天气/);
     assert.equal(messages[1]?.role, "user");
@@ -55,6 +57,24 @@ describe("scheduled prompt contract", () => {
     assert.ok(issues.some((x) => x.includes("换行")));
   });
 
+  it("flags section markers smashed into one line", () => {
+    const smashed =
+      "早上好老板🌤️ 深圳今日天气｜8月13日🌡️ 温度：26℃ ~ 31℃今日寄语：八月的雨";
+    const issues = scheduledOutputIssues(taskPrompt, smashed);
+    assert.ok(issues.some((x) => x.includes("🌤️") && x.includes("换行")));
+    assert.ok(issues.some((x) => x.includes("🌡️") && x.includes("换行")));
+  });
+
+  it("repairs smashed weather layout before send", () => {
+    const smashed =
+      "早上好，老板。🌤️ 深圳今日天气｜8月13日🌡️ 温度：26℃ ~ 31℃☁️ 天气：晴间多云今日寄语：八月的雨，下完就晴。";
+    const fixed = normalizeScheduledLayout(smashed);
+    assert.match(fixed, /\n\n🌤️/);
+    assert.match(fixed, /\n\n🌡️/);
+    assert.match(fixed, /\n\n☁️/);
+    assert.match(fixed, /\n\n今日寄语/);
+    assert.deepEqual(scheduledOutputIssues(taskPrompt, fixed).filter((x) => x.includes("换行")), []);
+  });
   it("uses the overall length bound, not the 寄语 subsection bound", () => {
     const output = `早上好呀，今天也慢慢醒来吧。
 

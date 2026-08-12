@@ -146,7 +146,15 @@ export class ScheduledScheduler {
         });
       }
       const prompt=interpolate(service.prompt_template,resolved.params);
-      const executionTime=new Date(scheduledPreviewTime(service.schedule,service.timezone,now));
+      // Smoke tests use wall-clock now so greetings/date match the click time.
+      // Production cron runs already fire at the schedule instant, so tick keeps now.
+      const executionTime=now;
+      onProgress?.({
+        level:"info",
+        stage:"prepare",
+        message:`测试按当前时刻执行（${executionTime.toLocaleString("zh-CN",{timeZone:service.timezone,hour12:false})}，${service.timezone}），正式调度仍按 ${service.schedule}`,
+        peerId:sub.peer_id,
+      });
       const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,scheduledTestLockSource("subscription",runId),executionTime,service.timezone,event=>onProgress?.({...event,peerId:sub.peer_id}),locationHintFromParams(resolved.params));
       if(result.sent){sent++;onProgress?.({level:"info",stage:"complete",message:"发送成功",peerId:sub.peer_id});}else {skipped++;details.push({peerId:sub.peer_id,reason:result.reason||"unknown"});onProgress?.({level:"error",stage:"complete",message:`发送失败：${result.reason||"unknown"}`,peerId:sub.peer_id});}
     }

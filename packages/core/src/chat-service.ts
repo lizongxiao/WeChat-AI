@@ -38,6 +38,7 @@ import {
   describeAttachments,
   parseFactsJson,
   parseProactiveSkip,
+  normalizeScheduledLayout,
   scheduledOutputIssues,
   type PromptAttachment,
 } from "./prompt.js";
@@ -1174,6 +1175,10 @@ export class ChatService {
     callOpts.maxTokens = SCHEDULED_MAX_TOKENS;
     req.onProgress?.({ stage: "generation", message: "开始生成定时消息" });
     let usage = await client.chatWithUsage(messages, callOpts);
+    usage = {
+      ...usage,
+      text: normalizeScheduledLayout(usage.text),
+    };
     req.onProgress?.({
       stage: "generation",
       message: `模型生成完成（${usage.text.length} 字符）`,
@@ -1189,12 +1194,13 @@ export class ChatService {
         { role: "assistant" as const, content: usage.text },
         {
           role: "user" as const,
-          content: `上面的结果未满足定时任务要求：\n- ${issues.join("\n- ")}\n请严格按原任务修正，只输出最终消息。`,
+          content: `上面的结果未满足定时任务要求：\n- ${issues.join("\n- ")}\n请严格按原任务修正，只输出最终消息。栏目之间必须换行，禁止整段挤成一行。`,
         },
       ];
       const retry = await client.chatWithUsage(retryMessages, callOpts);
       usage = {
         ...retry,
+        text: normalizeScheduledLayout(retry.text),
         promptTokens: usage.promptTokens + retry.promptTokens,
         completionTokens: usage.completionTokens + retry.completionTokens,
         totalTokens: usage.totalTokens + retry.totalTokens,
@@ -1222,9 +1228,11 @@ export class ChatService {
     // Scheduled output is one WeChat message, not a roleplay bubble sequence.
     // For ordinary text retain the model's paragraph layout exactly; the normal
     // reply formatter intentionally splits on newlines and caps at five parts.
-    const deliveryText = finalized.bubblesFromJson
-      ? finalized.displayText
-      : usage.text.replace(/\r\n?/g, "\n").trim();
+    const deliveryText = normalizeScheduledLayout(
+      finalized.bubblesFromJson
+        ? finalized.displayText
+        : usage.text.replace(/\r\n?/g, "\n").trim(),
+    );
     await insertMessage(this.db, { botAccountId:req.botAccountId, peerId:req.peerId, personaId:persona.id, role:"assistant", content:deliveryText, contextToken:req.contextToken });
     return { kind:"reply", text:deliveryText, bubbles:[deliveryText], parts:[{kind:"text",text:deliveryText}], bubblesFromJson:false, personaId:persona.id, personaSlug:persona.slug, ownerUserId:bot?.owner_user_id };
   }

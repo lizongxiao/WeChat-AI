@@ -416,9 +416,11 @@ export function buildScheduledMessages(params: {
   );
   const executionBlock = [
     "## 定时任务执行规则",
-    `本次任务的业务执行时间是 ${executionTime}（${params.timeZone}）。所有“今天、早上、日期”等相对时间均以此时间为准，不要根据实际调用时刻改写任务。`,
+    `本次任务的业务执行时间是 ${executionTime}（${params.timeZone}）。所有“今天、早上、晚上、日期”等相对时间，以及问候语，均以此时间为准。`,
+    "若执行时间不在早晨，不要机械说“早上好”；按该时刻自然问候（例如晚上用晚上好/夜里好）。",
     "这是独立的定时推送，不是在续接最近一轮聊天。",
     "任务内容与格式要求优先于 Persona；Persona 只决定措辞、语气和称呼，不得删减任务要求的栏目。",
+    "若任务要求保留换行或多栏目结构，输出中每个栏目（如 🌤️ / 🌡️ / 今日寄语）必须单独成行，禁止把整段挤成一行。",
     params.webSearchRequired && params.webSearchContext
       ? `本任务要求实时信息，服务端已完成联网查询。只能依据下方搜索结果填写实时数据；搜索结果未覆盖的字段要明确说明未知，不得凭记忆编造。\n\n## 联网查询结果\n${params.webSearchContext}`
       : params.webSearchRequired
@@ -469,6 +471,23 @@ export function scheduledOutputIssues(prompt: string, output: string): string[] 
   if (/保留换行/.test(prompt) && !output.includes("\n")) {
     issues.push("没有保留换行");
   }
+  // Weather / bulletin templates: section markers must start their own line.
+  for (const label of [
+    "🌤️",
+    "🌡️",
+    "☁️",
+    "🌧️",
+    "💨",
+    "👕",
+    "☂️",
+    "今日寄语",
+  ]) {
+    if (!prompt.includes(label) || !output.includes(label)) continue;
+    const idx = output.indexOf(label);
+    if (idx > 0 && output[idx - 1] !== "\n") {
+      issues.push(`栏目「${label}」前缺少换行`);
+    }
+  }
   const lengthRange = scheduledOverallLengthRange(prompt);
   if (lengthRange) {
     const length = [...output.trim()].length;
@@ -514,6 +533,34 @@ export function scheduledOverallLengthRange(
     return null;
   }
   return { min: Number(only[1]), max: Number(only[2]) };
+}
+
+/**
+ * Repair smashed one-line bulletins so WeChat receives readable paragraphs.
+ * Only inserts breaks before known section markers; leaves already-formatted text alone.
+ */
+export function normalizeScheduledLayout(text: string): string {
+  let out = (text ?? "").replace(/\r\n?/g, "\n").trim();
+  if (!out) return out;
+  const markers = [
+    "🌤️",
+    "🌡️",
+    "☁️",
+    "🌧️",
+    "💨",
+    "👕",
+    "☂️",
+    "「今日寄语",
+    "今日寄语",
+  ];
+  for (const marker of markers) {
+    const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(
+      new RegExp(`([^\\n])[ \\t]*(${escaped})`, "g"),
+      "$1\n\n$2",
+    );
+  }
+  return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /** Proactive outreach: no new user message; model may skip. */

@@ -14,7 +14,26 @@ interface Captured {
  * One recorder used for both paths: the platform path goes through the SDK's
  * injectable `fetch`, the tools-gateway path uses raw global fetch.
  */
-function installFetch(): Captured[] {
+function completion(message: Record<string, unknown>) {
+  return {
+    id: "cmpl-1",
+    object: "chat.completion",
+    created: 1,
+    model: "served-model",
+    choices: [{ index: 0, message, finish_reason: "stop" }],
+    usage: { prompt_tokens: 11, completion_tokens: 3, total_tokens: 14 },
+  };
+}
+
+const ANSWER = completion({ role: "assistant", content: "看到了" });
+
+function installFetch(
+  respond: (call: Captured, index: number) => Response = () =>
+    new Response(JSON.stringify(ANSWER), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+): Captured[] {
   const captured: Captured[] = [];
   const original = globalThis.fetch;
   restoreFetch = () => {
@@ -23,7 +42,7 @@ function installFetch(): Captured[] {
     restoreFetch = null;
   };
   const impl = (async (input: unknown, init?: RequestInit) => {
-    captured.push({
+    const call: Captured = {
       url: String(
         typeof input === "object" && input && "url" in input
           ? (input as { url: string }).url
@@ -32,29 +51,56 @@ function installFetch(): Captured[] {
       body: init?.body
         ? (JSON.parse(String(init.body)) as Record<string, unknown>)
         : {},
-    });
-    const payload = {
-      id: "cmpl-1",
-      object: "chat.completion",
-      created: 1,
-      model: "served-model",
-      choices: [
-        {
-          index: 0,
-          message: { role: "assistant", content: "看到了" },
-          finish_reason: "stop",
-        },
-      ],
-      usage: { prompt_tokens: 11, completion_tokens: 3, total_tokens: 14 },
     };
-    return new Response(JSON.stringify(payload), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    captured.push(call);
+    return respond(call, captured.length - 1);
   }) as typeof globalThis.fetch;
   globalThis.fetch = impl;
   capturingFetch = impl;
   return captured;
+}
+
+function json(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** A reasoning model that refuses `tool_choice: required` outright. */
+function installRejectingRequiredToolChoice(): Captured[] {
+  return installFetch((call) =>
+    call.body.tool_choice === "required"
+      ? json(
+          { error: { message: "Thinking mode does not support this tool_choice" } },
+          400,
+        )
+      : json(ANSWER),
+  );
+}
+
+/** A model that searches first and answers in the second round. */
+function installSearchingModelFetch(): Captured[] {
+  return installFetch((_call, index) =>
+    index === 0
+      ? json(
+          completion({
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: {
+                  name: "web_search",
+                  arguments: JSON.stringify({ query: "上海 今天 天气" }),
+                },
+              },
+            ],
+          }),
+        )
+      : json(ANSWER),
+  );
 }
 
 let capturingFetch: typeof fetch | null = null;
@@ -113,6 +159,35 @@ describe("multimodal messages (platform path)", () => {
     );
 
     assert.equal(captured[0]?.body.tool_choice, "required");
+  });
+
+  it("recovers when the model rejects a required tool_choice", async () => {
+    // Reasoning ("thinking") models answer `tool_choice: required` with a 400,
+    // which must not turn a scheduled push into a failed run.
+    const captured = installRejectingRequiredToolChoice();
+    const res = await platform().chatWithUsage(
+      [{ role: "user", content: "查询今天上海天气" }],
+      { tools: ["web_search"], requireToolUse: true },
+    );
+
+    assert.equal(res.text, "看到了");
+    assert.deepEqual(
+      captured.map((c) => c.body.tool_choice),
+      ["required", "auto"],
+    );
+  });
+
+  it("reports which builtin tools actually ran", async () => {
+    installSearchingModelFetch();
+    const res = await platform().chatWithUsage(
+      [{ role: "user", content: "查询今天上海天气" }],
+      {
+        tools: ["web_search"],
+        webSearch: async () => "上海 今天 多云 28~34℃",
+      },
+    );
+
+    assert.deepEqual(res.toolsUsed, ["web_search"]);
   });
 
   it("forwards user content parts verbatim", async () => {

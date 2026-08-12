@@ -31,6 +31,7 @@ class SeqFakeLlm implements Pick<LlmClient, "chat" | "chatWithUsage"> {
       completionTokens: 7,
       totalTokens: 10,
       model: "fake",
+      toolsUsed: [],
     };
   }
 }

@@ -12,7 +12,7 @@ import {
   getPersonaBySlug,
   upsertBotAccount,
 } from "@wechat-ai/db";
-import type { LlmClient } from "@wechat-ai/llm";
+import type { BuiltinToolName, LlmClient } from "@wechat-ai/llm";
 import { ChatService } from "./chat-service.js";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
@@ -21,7 +21,10 @@ class FakeLlm implements Pick<LlmClient, "chat" | "chatWithUsage"> {
   calls = 0;
   lastMessages: unknown;
   lastOpts: unknown;
-  constructor(private reply: string | string[]) {}
+  constructor(
+    private reply: string | string[],
+    private toolsUsed: BuiltinToolName[] = [],
+  ) {}
   private next(): string {
     this.calls++;
     if (typeof this.reply === "string") return this.reply;
@@ -40,6 +43,7 @@ class FakeLlm implements Pick<LlmClient, "chat" | "chatWithUsage"> {
       completionTokens: 5,
       totalTokens: 15,
       model: "fake",
+      toolsUsed: this.toolsUsed,
     };
   }
 }
@@ -358,5 +362,27 @@ describe("ChatService multi-user isolation (Redis)", () => {
     assert.equal((fake.lastMessages as unknown[]).length,2,"scheduled execution must not replay recent chat");
     assert.match(JSON.stringify(fake.lastMessages),/定时任务执行规则/);
     await db.close();
+  });
+
+  it("never pushes a fresh-data schedule the model answered without searching", async (t) => {
+    let db;
+    try { db = openDatabase(redisUrl); await Promise.race([db.ping(), new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2500))]); }
+    catch { try { await db?.close(); } catch {} t.skip("Redis not available"); return; }
+    await seedPersonas(db);
+    const cat = await getPersonaBySlug(db, "catgirl");
+    assert.ok(cat);
+    const botId=`bot_scheduled_search_${Date.now()}`; const peerId="scheduled_search_peer@im.wechat";
+    await upsertBotAccount(db,{id:botId,ownerUserId:"u_test",displayName:"test",botToken:"test-token"});
+    await approvePeer(db,botId,peerId);
+    await setAssignment(db,botId,peerId,cat!.id);
+    // Answer looks plausible, but no web_search ran — that is invented weather.
+    const chat=new ChatService(db,asLlm(new FakeLlm("今天多云 28~34℃")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,toolsBaseUrl:"https://tools.test",toolsApiKey:"tk"});
+    const result=await chat.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天的天气",webSearchEnabled:true,source:"subscription"});
+    const searched=new ChatService(db,asLlm(new FakeLlm("今天多云 28~34℃",["web_search"])),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,toolsBaseUrl:"https://tools.test",toolsApiKey:"tk"});
+    const delivered=await searched.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天的天气",webSearchEnabled:true,source:"subscription"});
+    await db.close();
+    assert.equal(result.kind,"skip");
+    assert.equal(result.skipReason,"web_search_not_performed");
+    assert.equal(delivered.kind,"reply","a schedule that really searched must still be sent");
   });
 });

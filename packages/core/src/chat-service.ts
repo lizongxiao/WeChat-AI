@@ -972,8 +972,11 @@ export class ChatService {
       forceWebSearch: req.webSearchEnabled,
       includeTimeTool: false,
     });
+    // `requireToolUse` is only a request: reasoning models reject a forced tool
+    // choice, so the search has to be confirmed after the fact instead.
     callOpts.requireToolUse = req.webSearchEnabled;
     let usage = await client.chatWithUsage(messages, callOpts);
+    let searched = usage.toolsUsed?.includes("web_search") === true;
     let issues = scheduledOutputIssues(req.prompt, usage.text);
     if (issues.length) {
       const retryMessages = [
@@ -991,10 +994,14 @@ export class ChatService {
         completionTokens: usage.completionTokens + retry.completionTokens,
         totalTokens: usage.totalTokens + retry.totalTokens,
       };
+      searched = searched || retry.toolsUsed?.includes("web_search") === true;
       issues = scheduledOutputIssues(req.prompt, usage.text);
     }
     const owner = bot?.owner_user_id ? await getUser(this.db, bot.owner_user_id) : undefined;
     await recordTokenUsage(this.db, { userId: bot?.owner_user_id, botId: req.botAccountId, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, username: owner?.username, botName: bot?.display_name });
+    if (req.webSearchEnabled && !searched) {
+      return { kind: "skip", skipReason: "web_search_not_performed" };
+    }
     if (issues.length) {
       return {
         kind: "skip",

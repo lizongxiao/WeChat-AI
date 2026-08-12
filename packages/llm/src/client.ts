@@ -96,6 +96,12 @@ export interface ChatResult {
   completionTokens: number;
   totalTokens: number;
   model: string;
+  /**
+   * Builtin tools the model actually invoked. `requireToolUse` is only a
+   * request — a reasoning model may refuse it — so callers that depend on
+   * fresh data must check this rather than trust the flag.
+   */
+  toolsUsed: BuiltinToolName[];
 }
 
 export type BuiltinToolName = "get_current_time" | "web_search";
@@ -127,6 +133,16 @@ export interface ChatCallOptions {
    * exclusively via the tools gateway (main site never dials search engines).
    */
   webSearch?: (query: string, maxResults?: number) => Promise<string>;
+}
+
+/**
+ * Reasoning ("thinking") models reject a forced tool choice with a 400 instead
+ * of ignoring it, so the call has to be replayed with `auto` rather than
+ * failing the whole turn.
+ */
+function rejectsForcedToolChoice(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  return /tool_choice/i.test(message);
 }
 
 const TIME_TOOL: ChatCompletionTool = {
@@ -373,16 +389,32 @@ export class LlmClient {
     let promptTokens = 0;
     let completionTokens = 0;
     let model = modelOverride ?? this.model;
+    const toolsUsed: BuiltinToolName[] = [];
 
     for (let round = 0; round <= maxRounds; round++) {
-      const res = await this.createCompletion(
-        apiMessages,
-        toolsOpt,
-        upstream,
-        modelOverride,
-        maxTokensOverride,
-        round === 0 && opts.requireToolUse === true,
-      );
+      const forceTools =
+        round === 0 && opts.requireToolUse === true && Boolean(toolsOpt);
+      let res;
+      try {
+        res = await this.createCompletion(
+          apiMessages,
+          toolsOpt,
+          upstream,
+          modelOverride,
+          maxTokensOverride,
+          forceTools,
+        );
+      } catch (err) {
+        if (!forceTools || !rejectsForcedToolChoice(err)) throw err;
+        res = await this.createCompletion(
+          apiMessages,
+          toolsOpt,
+          upstream,
+          modelOverride,
+          maxTokensOverride,
+          false,
+        );
+      }
 
       const usage = res.usage;
       promptTokens += usage?.prompt_tokens ?? 0;
@@ -403,8 +435,15 @@ export class LlmClient {
         });
         for (const tc of toolCalls) {
           const fn = tc.function;
+          const name = fn?.name ?? "";
+          if (
+            (name === "get_current_time" || name === "web_search") &&
+            !toolsUsed.includes(name)
+          ) {
+            toolsUsed.push(name);
+          }
           const result = await this.runBuiltinTool(
-            fn?.name ?? "",
+            name,
             fn?.arguments ?? "{}",
             timeZone,
             opts.webSearch,
@@ -428,6 +467,7 @@ export class LlmClient {
         completionTokens,
         totalTokens: promptTokens + completionTokens,
         model,
+        toolsUsed,
       };
     }
 

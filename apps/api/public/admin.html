@@ -8628,17 +8628,29 @@
         if (run.error) lines.push("", `致命错误：${run.error}`);
         return lines.join("\n");
       };
+      const scrollScheduledRunLog = () => {
+        const pre = $("modalBody");
+        const wrap = $("modal")?.querySelector(".modal-body");
+        // Logs live in <pre max-height:40vh>, which scrolls independently of .modal-body.
+        const pin = () => {
+          if (pre) pre.scrollTop = pre.scrollHeight;
+          if (wrap) wrap.scrollTop = wrap.scrollHeight;
+        };
+        pin();
+        requestAnimationFrame(pin);
+      };
       const renderScheduledRun = (service, run, openIfClosed = false) => {
         const text = scheduledRunText(run);
         if (!$("modal").classList.contains("show")) {
-          if (openIfClosed) openModal(`测试日志 · ${service.name}`, "日志每秒自动刷新，关闭弹窗不会停止后台测试。", text);
-          else return;
+          if (openIfClosed) {
+            openModal(`测试日志 · ${service.name}`, "日志每秒自动刷新，关闭弹窗不会停止后台测试。", text);
+            scrollScheduledRunLog();
+          } else return;
         } else {
           $("modalBody").style.display = "block";
           $("modalBody").textContent = text;
           setModalCopy(text);
-          const body = $("modal").querySelector(".modal-body");
-          if (body) body.scrollTop = body.scrollHeight;
+          scrollScheduledRunLog();
         }
       };
       document.querySelectorAll("[data-ss-test]").forEach((b) => b.onclick = async () => {

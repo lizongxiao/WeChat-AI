@@ -17,8 +17,10 @@ export {
   buildUserContent,
   describeAttachments,
   BOT_NAME_VARS,
+  normalizeScheduledLayout,
   parseFactsJson,
   parseProactiveSkip,
+  splitScheduledBulletin,
   type AttachmentKind,
   type PromptAttachment,
 } from "./prompt.js";

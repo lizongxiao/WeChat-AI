@@ -4,6 +4,7 @@ import {
   buildScheduledMessages,
   normalizeScheduledLayout,
   scheduledOutputIssues,
+  splitScheduledBulletin,
 } from "./prompt.js";
 import {
   extractWeatherLocation,
@@ -70,11 +71,31 @@ describe("scheduled prompt contract", () => {
       "早上好，老板。🌤️ 深圳今日天气｜8月13日🌡️ 温度：26℃ ~ 31℃☁️ 天气：晴间多云今日寄语：八月的雨，下完就晴。";
     const fixed = normalizeScheduledLayout(smashed);
     assert.match(fixed, /\n\n🌤️/);
-    assert.match(fixed, /\n\n🌡️/);
-    assert.match(fixed, /\n\n☁️/);
+    assert.match(fixed, /\n🌡️/);
+    assert.match(fixed, /\n☁️/);
     assert.match(fixed, /\n\n今日寄语/);
+    assert.doesNotMatch(fixed, /「\n\n今日寄语/);
     assert.deepEqual(scheduledOutputIssues(taskPrompt, fixed).filter((x) => x.includes("换行")), []);
   });
+
+  it("keeps 「今日寄语 together and splits bulletin into WeChat bubbles", () => {
+    const smashed =
+      "夜里好呀～快12点了。🌤️ 深圳今日天气｜8月12日 周三🌡️ 温度：26℃ ～ 31℃☁️ 天气：多云转阴🌧️ 降雨：有阵雨概率💨 风力：东南风 2～3 级👕 穿衣：短袖就行☂️ 出行：伞带好「今日寄语：热气退一点，人也轻松一点。」这么晚了还没睡呀？";
+    const fixed = normalizeScheduledLayout(smashed);
+    assert.match(fixed, /\n\n「今日寄语：/);
+    assert.doesNotMatch(fixed, /「\n+今日寄语/);
+    const chunks = splitScheduledBulletin(fixed);
+    assert.equal(chunks.length, 5, JSON.stringify(chunks));
+    assert.match(chunks[0]!, /夜里好/);
+    assert.match(chunks[1]!, /^🌤️/);
+    assert.match(chunks[1]!, /\n🌡️/);
+    const wear = chunks.find((c) => c.startsWith("👕"));
+    assert.ok(wear);
+    assert.match(wear!, /☂️/);
+    assert.equal(chunks[3], "「今日寄语：热气退一点，人也轻松一点。」");
+    assert.match(chunks[4]!, /还没睡/);
+  });
+
   it("uses the overall length bound, not the 寄语 subsection bound", () => {
     const output = `早上好呀，今天也慢慢醒来吧。
 

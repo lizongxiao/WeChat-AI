@@ -536,31 +536,42 @@ export function scheduledOverallLengthRange(
 }
 
 /**
- * Repair smashed one-line bulletins so WeChat receives readable paragraphs.
- * Only inserts breaks before known section markers; leaves already-formatted text alone.
+ * Repair smashed one-line bulletins into the template's visual structure.
+ * Weather field rows get a single newline; major sections get a blank line.
  */
 export function normalizeScheduledLayout(text: string): string {
   let out = (text ?? "").replace(/\r\n?/g, "\n").trim();
   if (!out) return out;
-  const markers = [
-    "🌤️",
-    "🌡️",
-    "☁️",
-    "🌧️",
-    "💨",
-    "👕",
-    "☂️",
-    "「今日寄语",
-    "今日寄语",
-  ];
-  for (const marker of markers) {
-    const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    out = out.replace(
-      new RegExp(`([^\\n])[ \\t]*(${escaped})`, "g"),
-      "$1\n\n$2",
-    );
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Field rows: one line each (no blank line between 温度/天气/降雨/风力/出行).
+  for (const marker of ["🌡️", "☁️", "🌧️", "💨", "☂️"]) {
+    const e = escape(marker);
+    out = out.replace(new RegExp(`([^\\n])[ \\t]*(${e})`, "gu"), "$1\n$2");
   }
+  // Major sections: blank line before weather block and 穿衣.
+  for (const marker of ["🌤️", "👕"]) {
+    const e = escape(marker);
+    out = out.replace(new RegExp(`([^\\n])[ \\t]*(${e})`, "gu"), "$1\n\n$2");
+  }
+  // Keep「今日寄语 as one token; bare 今日寄语 must not split after「.
+  out = out.replace(/([^\n])[ \t]*(「今日寄语)/gu, "$1\n\n$2");
+  out = out.replace(/([^\n「])[ \t]*(今日寄语)/gu, "$1\n\n$2");
+  // Closing after 「今日寄语：…」 must not stay on the same line.
+  out = out.replace(/(「今日寄语：[^\n」]*」)\s*(?=\S)/gu, "$1\n\n");
   return out.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * Split a bulletin on blank lines so WeChat can show greeting / weather /
+ * note / closing as separate bubbles (single-message newlines are unreliable).
+ */
+export function splitScheduledBulletin(text: string): string[] {
+  const normalized = normalizeScheduledLayout(text);
+  if (!normalized) return [];
+  return normalized
+    .split(/\n{2,}/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /** Proactive outreach: no new user message; model may skip. */

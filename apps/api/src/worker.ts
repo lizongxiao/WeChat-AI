@@ -1067,8 +1067,8 @@ export class BotWorkerManager {
     }
   }
 
-  /** Scheduled replies use the normal text sanitizer and iLink sender, but are
-   * intentionally one message so long reports are not capped at five bubbles. */
+  /** Scheduled replies use the normal text sanitizer and iLink sender.
+   * Weather bulletins may be multiple paragraph bubbles (not the 5-bubble chat cap). */
   private async sendScheduledReply(
     botId: string,
     peerId: string,
@@ -1094,7 +1094,9 @@ export class BotWorkerManager {
       client = new ILinkClient({ botToken: creds.botToken, baseUrl: creds.baseUrl ?? undefined });
     }
     try {
-      if (this.opts.splitReply === false || parts.length === 1) {
+      // Scheduled bulletins need every paragraph bubble; do not honor the
+      // global splitReply=false toggle (that would drop everything after part 0).
+      if (parts.length === 1) {
         await this.sendReplyPart(client, peerId, contextToken, parts[0]!, reply.ownerUserId || "");
       } else {
         await this.sendHumanParts(client, peerId, contextToken, parts, reply.ownerUserId || "");

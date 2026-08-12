@@ -40,6 +40,7 @@ import {
   parseProactiveSkip,
   normalizeScheduledLayout,
   scheduledOutputIssues,
+  splitScheduledBulletin,
   type PromptAttachment,
 } from "./prompt.js";
 import {
@@ -1146,7 +1147,6 @@ export class ChatService {
     ]);
     if (!systemPrompt) return { kind: "skip", skipReason: "persona_prompt_missing" };
     const botName = bot?.display_name?.trim() || "助手";
-    const stickers = this.opts.stickersEnabled === false || !bot?.owner_user_id ? [] : await listStickersForOwnerPrompt(this.db, bot.owner_user_id);
     const selectedMemories = selectMemoriesForPrompt(memories, req.prompt, { topK: this.opts.memoryTopK, fullInjectMax: this.opts.memoryFullInjectMax });
     const messages = buildScheduledMessages({
       systemPrompt,
@@ -1223,18 +1223,15 @@ export class ChatService {
         skipReason: `scheduled_output_invalid:${issues.join(";")}`,
       };
     }
-    const finalized = await this.finalizeReplyParts({ rawLlmText: usage.text, stickers, botAccountId: req.botAccountId, ownerUserId: bot?.owner_user_id, ownerUsername: owner?.username, botName: bot?.display_name });
-    if (!finalized.displayText.trim()) return { kind: "skip", skipReason: "empty_reply" };
-    // Scheduled output is one WeChat message, not a roleplay bubble sequence.
-    // For ordinary text retain the model's paragraph layout exactly; the normal
-    // reply formatter intentionally splits on newlines and caps at five parts.
-    const deliveryText = normalizeScheduledLayout(
-      finalized.bubblesFromJson
-        ? finalized.displayText
-        : usage.text.replace(/\r\n?/g, "\n").trim(),
-    );
+    // Do not run the ordinary multi-bubble / reply-filter pipeline: it caps at
+    // five parts and can flatten the weather layout. Normalize + paragraph-split
+    // instead so WeChat gets separate bubbles (in-message newlines are unreliable).
+    const deliveryText = normalizeScheduledLayout(usage.text);
+    if (!deliveryText.trim()) return { kind: "skip", skipReason: "empty_reply" };
+    const bubbles = splitScheduledBulletin(deliveryText);
+    const parts = bubbles.map((t) => ({ kind: "text" as const, text: t }));
     await insertMessage(this.db, { botAccountId:req.botAccountId, peerId:req.peerId, personaId:persona.id, role:"assistant", content:deliveryText, contextToken:req.contextToken });
-    return { kind:"reply", text:deliveryText, bubbles:[deliveryText], parts:[{kind:"text",text:deliveryText}], bubblesFromJson:false, personaId:persona.id, personaSlug:persona.slug, ownerUserId:bot?.owner_user_id };
+    return { kind:"reply", text:deliveryText, bubbles, parts, bubblesFromJson:false, personaId:persona.id, personaSlug:persona.slug, ownerUserId:bot?.owner_user_id };
   }
 
   async extractMemory(

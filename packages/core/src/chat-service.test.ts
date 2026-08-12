@@ -376,15 +376,17 @@ describe("ChatService multi-user isolation (Redis)", () => {
     await approvePeer(db,botId,peerId);
     await setAssignment(db,botId,peerId,cat!.id);
     let searchQuery="";
+    const progress:string[]=[];
     const fake=new FakeLlm("今天多云 28~34℃");
     const chat=new ChatService(db,asLlm(fake),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,webSearchRunner:async(query)=>{searchQuery=query;return "上海：多云，28~34℃，东南风";}});
-    const result=await chat.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天上海的天气",webSearchEnabled:true,source:"subscription"});
+    const result=await chat.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天上海的天气",webSearchEnabled:true,source:"subscription",onProgress:event=>progress.push(event.stage)});
     const failed=new ChatService(db,asLlm(new FakeLlm("不应发送")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,webSearchRunner:async()=>{throw new Error("search down");}});
     const blocked=await failed.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天上海的天气",webSearchEnabled:true,source:"subscription"});
     await db.close();
     assert.equal(result.kind,"reply");
     assert.match(searchQuery,/上海.*天气/);
     assert.match(JSON.stringify(fake.lastMessages),/28~34℃/);
+    assert.deepEqual(progress,["web_search","web_search","generation","generation","validation"]);
     assert.equal(blocked.kind,"skip");
     assert.match(blocked.skipReason??"",/^web_search_failed:/);
   });

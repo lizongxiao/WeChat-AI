@@ -241,6 +241,31 @@ export interface WorkerRuntimeStats {
   nodesTotal?: number;
 }
 
+export interface ScheduledTestRunLog {
+  at: string;
+  level: "info" | "warn" | "error";
+  stage: string;
+  message: string;
+  peerId?: string;
+}
+
+export interface ScheduledTestRunSnapshot {
+  id: string;
+  serviceId: string;
+  personaId?: string;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  finishedAt?: string;
+  logs: ScheduledTestRunLog[];
+  result?: {
+    sent: number;
+    skipped: number;
+    matched: number;
+    details: Array<{ peerId: string; reason: string }>;
+  };
+  error?: string;
+}
+
 /**
  * Single-process worker: API can share this process (one Docker image).
  *
@@ -266,6 +291,7 @@ export class BotWorkerManager {
   private readonly replyConcurrency: number;
   private inboxMaxLen: number;
   private readonly startedAt: string;
+  private scheduledTestRuns = new Map<string, ScheduledTestRunSnapshot>();
   private lastRebalanceAt = 0;
   /** Admin fence: do not claim/renew/register until cleared */
   private fenced = false;
@@ -906,6 +932,77 @@ export class BotWorkerManager {
   async testScheduledService(serviceId: string, personaId?: string) {
     if (!this.scheduled) throw new Error("scheduled_scheduler_unavailable");
     return this.scheduled.testService(serviceId, personaId);
+  }
+
+  startScheduledServiceTest(
+    serviceId: string,
+    personaId?: string,
+  ): ScheduledTestRunSnapshot {
+    if (!this.scheduled) throw new Error("scheduled_scheduler_unavailable");
+    const active = [...this.scheduledTestRuns.values()].find(
+      (item) =>
+        item.status === "running" &&
+        item.serviceId === serviceId &&
+        item.personaId === personaId,
+    );
+    if (active) return structuredClone(active);
+    const run: ScheduledTestRunSnapshot = {
+      id: randomUUID(),
+      serviceId,
+      ...(personaId ? { personaId } : {}),
+      status: "running",
+      startedAt: new Date().toISOString(),
+      logs: [
+        {
+          at: new Date().toISOString(),
+          level: "info",
+          stage: "start",
+          message: "测试任务已创建",
+        },
+      ],
+    };
+    this.scheduledTestRuns.set(run.id, run);
+    // Keep diagnostics bounded; completed runs are disposable operational data.
+    if (this.scheduledTestRuns.size > 50) {
+      const removable = [...this.scheduledTestRuns.values()]
+        .filter((item) => item.status !== "running")
+        .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+      for (const item of removable.slice(0, this.scheduledTestRuns.size - 50)) {
+        this.scheduledTestRuns.delete(item.id);
+      }
+    }
+    void this.scheduled
+      .testService(
+        serviceId,
+        personaId,
+        (event) => {
+          run.logs.push({ at: new Date().toISOString(), ...event });
+        },
+        run.id,
+      )
+      .then((result) => {
+        run.result = result;
+        run.status = "completed";
+        run.finishedAt = new Date().toISOString();
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        run.error = message;
+        run.status = "failed";
+        run.finishedAt = new Date().toISOString();
+        run.logs.push({
+          at: run.finishedAt,
+          level: "error",
+          stage: "fatal",
+          message,
+        });
+      });
+    return structuredClone(run);
+  }
+
+  getScheduledServiceTest(runId: string): ScheduledTestRunSnapshot | null {
+    const run = this.scheduledTestRuns.get(runId);
+    return run ? structuredClone(run) : null;
   }
 
   /** Wake broadcast runner after admin creates a job. */

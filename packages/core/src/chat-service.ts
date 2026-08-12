@@ -152,6 +152,10 @@ export interface ScheduledChatRequest {
   /** Logical schedule time, which can differ from wall time during a preview. */
   executionTime?: string;
   timeZone?: string;
+  onProgress?: (event: {
+    stage: "web_search" | "generation" | "validation";
+    message: string;
+  }) => void;
 }
 
 function scheduledSearchQuery(
@@ -997,6 +1001,10 @@ export class ChatService {
     let webSearchContext: string | undefined;
     if (req.webSearchEnabled) {
       const query = scheduledSearchQuery(req.prompt, executionTime, timeZone);
+      req.onProgress?.({
+        stage: "web_search",
+        message: `开始联网查询：${query}`,
+      });
       try {
         webSearchContext = this.opts.webSearchRunner
           ? await this.opts.webSearchRunner(
@@ -1008,10 +1016,22 @@ export class ChatService {
               this.opts.webSearchMaxResults ?? 5,
             );
         if (!hasUsableSearchResults(webSearchContext)) {
+          req.onProgress?.({
+            stage: "web_search",
+            message: "联网查询没有返回可用结果",
+          });
           return { kind: "skip", skipReason: "web_search_failed:no_results" };
         }
+        req.onProgress?.({
+          stage: "web_search",
+          message: `联网查询完成（${webSearchContext.length} 字符）`,
+        });
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
+        req.onProgress?.({
+          stage: "web_search",
+          message: `联网查询失败：${reason.slice(0, 200)}`,
+        });
         return {
           kind: "skip",
           skipReason: `web_search_failed:${reason.slice(0, 200)}`,
@@ -1043,9 +1063,18 @@ export class ChatService {
       ownerUserId: bot?.owner_user_id,
       includeTimeTool: false,
     });
+    req.onProgress?.({ stage: "generation", message: "开始生成定时消息" });
     let usage = await client.chatWithUsage(messages, callOpts);
+    req.onProgress?.({
+      stage: "generation",
+      message: `模型生成完成（${usage.text.length} 字符）`,
+    });
     let issues = scheduledOutputIssues(req.prompt, usage.text);
     if (issues.length) {
+      req.onProgress?.({
+        stage: "validation",
+        message: `格式校验未通过，准备重试：${issues.join("；")}`,
+      });
       const retryMessages = [
         ...messages,
         { role: "assistant" as const, content: usage.text },
@@ -1062,6 +1091,14 @@ export class ChatService {
         totalTokens: usage.totalTokens + retry.totalTokens,
       };
       issues = scheduledOutputIssues(req.prompt, usage.text);
+      req.onProgress?.({
+        stage: "validation",
+        message: issues.length
+          ? `重试后仍未通过：${issues.join("；")}`
+          : "重试后格式校验通过",
+      });
+    } else {
+      req.onProgress?.({ stage: "validation", message: "格式校验通过" });
     }
     const owner = bot?.owner_user_id ? await getUser(this.db, bot.owner_user_id) : undefined;
     await recordTokenUsage(this.db, { userId: bot?.owner_user_id, botId: req.botAccountId, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, username: owner?.username, botName: bot?.display_name });

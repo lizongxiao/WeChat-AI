@@ -27,6 +27,10 @@ describe("scheduled cron matching", () => {
     // It must still send rather than being reported as a duplicate execution.
     assert.notEqual(scheduledTestLockSource("subscription"), "subscription");
     assert.equal(scheduledTestLockSource("subscription"), "subscription:test");
+    assert.notEqual(
+      scheduledTestLockSource("subscription", "run-a"),
+      scheduledTestLockSource("subscription", "run-b"),
+    );
   });
 
   it("previews a service at its next planned execution time", () => {

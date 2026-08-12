@@ -1655,6 +1655,156 @@
     #schedules .table-wrap { overflow-x: auto; }
     #schedules .data-table { min-width: 980px; }
     #schedules .data-table td:last-child .row-actions { flex-wrap: nowrap; }
+    #schedules .schedule-editor {
+      padding: 0;
+      overflow: hidden;
+    }
+    #schedules .schedule-editor-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--separator);
+      background: var(--surface-2);
+    }
+    #schedules .schedule-editor-head h3,
+    #schedules .schedule-list-panel .panel-head h3 {
+      margin: 0;
+    }
+    #schedules .schedule-editor-head p,
+    #schedules .schedule-list-panel .panel-head p {
+      margin: 5px 0 0;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--text-tertiary);
+    }
+    #schedules .schedule-editor-body {
+      padding: 20px;
+      gap: 18px;
+    }
+    #schedules .schedule-basic-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      gap: 14px;
+      align-items: end;
+    }
+    #schedules .schedule-basic-grid > label {
+      align-content: start;
+    }
+    #schedules .schedule-name { grid-column: span 2; }
+    #schedules .schedule-full { grid-column: 1 / -1; }
+    #schedules .schedule-web-toggle .check-label {
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--separator);
+      border-radius: var(--radius-sm);
+      background: var(--input-bg);
+      font-weight: 500;
+      color: var(--text);
+    }
+    #schedules .schedule-content-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
+      gap: 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--separator);
+      align-items: stretch;
+    }
+    #schedules .schedule-content-grid > label,
+    #schedules .schedule-side-fields {
+      min-width: 0;
+    }
+    #schedules .schedule-content-grid textarea {
+      min-height: 250px;
+      height: 100%;
+    }
+    #schedules .schedule-side-fields {
+      display: grid;
+      grid-template-rows: 1fr auto;
+      gap: 14px;
+    }
+    #schedules .schedule-side-fields textarea {
+      min-height: 130px;
+    }
+    #schedules .schedule-side-fields select[multiple] {
+      min-height: 122px;
+      padding: 8px;
+    }
+    #schedules .field-help {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      font-weight: 400;
+    }
+    #schedules .schedule-editor-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 20px;
+      border-top: 1px solid var(--separator);
+      background: var(--surface-2);
+    }
+    #schedules .schedule-editor-actions .btn {
+      min-width: 112px;
+      justify-content: center;
+    }
+    #schedules .schedule-list-panel {
+      padding: 0;
+      overflow: hidden;
+    }
+    #schedules .schedule-list-panel > .panel-head {
+      padding: 16px 18px 12px;
+      margin: 0;
+      border-bottom: 1px solid var(--separator);
+    }
+    #schedules .schedule-services-table { min-width: 920px; }
+    #schedules .schedule-tasks-table { min-width: 1180px; }
+    #schedules .schedule-services-table th:last-child,
+    #schedules .schedule-services-table td:last-child {
+      width: 250px;
+    }
+    #schedules .schedule-tasks-table th:last-child,
+    #schedules .schedule-tasks-table td:last-child {
+      width: 190px;
+    }
+    #schedules .data-table td {
+      padding-top: 13px;
+      padding-bottom: 13px;
+    }
+    @media (max-width: 1100px) {
+      #schedules .schedule-basic-grid {
+        grid-template-columns: repeat(3, minmax(150px, 1fr));
+      }
+      #schedules .schedule-name { grid-column: span 2; }
+    }
+    @media (max-width: 760px) {
+      #schedules .schedule-editor-head,
+      #schedules .schedule-editor-actions {
+        padding-left: 14px;
+        padding-right: 14px;
+      }
+      #schedules .schedule-editor-body { padding: 14px; }
+      #schedules .schedule-basic-grid,
+      #schedules .schedule-content-grid {
+        grid-template-columns: 1fr;
+      }
+      #schedules .schedule-name,
+      #schedules .schedule-full { grid-column: auto; }
+      #schedules .schedule-editor-actions {
+        align-items: stretch;
+        flex-direction: column-reverse;
+      }
+      #schedules .schedule-editor-actions > .btn,
+      #schedules .schedule-editor-actions .row-actions,
+      #schedules .schedule-editor-actions .row-actions .btn {
+        width: 100%;
+      }
+      #schedules .schedule-editor-actions .row-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
     td.col-actions .btn-sm {
       min-height: 30px;
       padding: 4px 10px;
@@ -4233,23 +4383,43 @@
       <section id="schedules">
         <h1 class="page-title">定时服务管理</h1>
         <p class="page-sub">系统订阅服务与用户自建任务分开管理；仅超管可见。</p>
-        <div class="panel form-grid" style="margin-bottom:16px">
-          <h3 id="ssFormTitle" style="grid-column:1/-1;margin:0">新建系统订阅服务</h3>
+        <div class="panel schedule-editor" style="margin-bottom:18px">
+          <div class="schedule-editor-head">
+            <div>
+              <h3 id="ssFormTitle">新建系统订阅服务</h3>
+              <p>配置执行计划、内容模板及允许使用该服务的 Persona。</p>
+            </div>
+            <span class="badge accent"><i class="bi bi-calendar2-check"></i> 系统服务</span>
+          </div>
           <input id="ssEditId" type="hidden" />
-          <label>名称<input id="ssName" placeholder="每日天气预报" /></label>
-          <label>频率<select id="ssFrequency"><option value="daily">每天</option><option value="weekly">每周</option></select></label>
-          <label id="ssWeekdayWrap" hidden>星期<select id="ssWeekday"><option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="0">周日</option></select></label>
-          <label>执行时间<input id="ssTime" type="time" value="08:00" /></label>
-          <label>时区<input id="ssTimezone" value="Asia/Shanghai" /></label>
-          <label class="check-label"><input id="ssWeb" type="checkbox" />允许联网搜索</label>
-          <label style="grid-column:1/-1">描述<input id="ssDescription" /></label>
-          <label style="grid-column:1/-1">Prompt 模板<textarea id="ssPrompt" placeholder="联网查询今天 {{location}} 的天气并简要推送。"></textarea></label>
-          <label style="grid-column:1/-1">参数 Schema（JSON）<textarea id="ssSchema" placeholder='{"required":["location"],"properties":{"location":{"type":"string"}}}'></textarea></label>
-          <label style="grid-column:1/-1">开放 Persona（可多选）<select id="ssPersonas" multiple size="5"></select></label>
-          <div class="row-actions"><button class="btn btn-primary" id="ssCreate" type="button">创建服务</button><button class="btn btn-secondary" id="ssCancelEdit" type="button" hidden>取消编辑</button><button class="btn btn-secondary" id="ssRefresh" type="button">刷新</button></div>
+          <div class="schedule-editor-body form-grid">
+            <div class="schedule-basic-grid">
+              <label class="schedule-name">服务名称<input id="ssName" placeholder="例如：每日天气预报" /></label>
+              <label>执行频率<select id="ssFrequency"><option value="daily">每天</option><option value="weekly">每周</option></select></label>
+              <label id="ssWeekdayWrap" hidden>执行星期<select id="ssWeekday"><option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="0">周日</option></select></label>
+              <label>执行时间<input id="ssTime" type="time" value="08:00" /></label>
+              <label>时区<input id="ssTimezone" value="Asia/Shanghai" /></label>
+              <label class="schedule-web-toggle"><span>实时数据</span><span class="check-label"><input id="ssWeb" type="checkbox" />允许联网搜索</span></label>
+              <label class="schedule-full">服务描述<input id="ssDescription" placeholder="说明该服务会向用户推送什么内容" /></label>
+            </div>
+            <div class="schedule-content-grid">
+              <label>Prompt 模板<textarea id="ssPrompt" placeholder="联网查询今天 {{location}} 的天气并简要推送。"></textarea><span class="field-help">支持参数占位符，例如 {{location}}</span></label>
+              <div class="schedule-side-fields">
+                <label>参数 Schema（JSON）<textarea id="ssSchema" placeholder='{"required":["location"],"properties":{"location":{"type":"string"}}}'></textarea></label>
+                <label>开放 Persona（⌘ / Ctrl 多选）<select id="ssPersonas" multiple size="5"></select></label>
+              </div>
+            </div>
+          </div>
+          <div class="schedule-editor-actions">
+            <button class="btn btn-secondary" id="ssRefresh" type="button"><i class="bi bi-arrow-clockwise"></i>刷新数据</button>
+            <div class="row-actions">
+              <button class="btn btn-secondary" id="ssCancelEdit" type="button" hidden>取消编辑</button>
+              <button class="btn btn-primary" id="ssCreate" type="button"><i class="bi bi-plus-lg"></i>创建服务</button>
+            </div>
+          </div>
         </div>
-        <div class="panel"><h3>系统订阅服务</h3><div class="table-wrap"><table class="data-table"><thead><tr><th>服务名称</th><th>开放 Persona</th><th>订阅人数</th><th>执行计划</th><th>状态</th><th>管理</th></tr></thead><tbody id="ssServices"></tbody></table></div></div>
-        <div class="panel" style="margin-top:16px"><h3>用户自建任务</h3><div class="table-wrap"><table class="data-table"><thead><tr><th>用户 / Peer</th><th>Bot</th><th>Persona</th><th>任务</th><th>执行计划</th><th>下次执行</th><th>状态</th><th>来源</th><th>管理</th></tr></thead><tbody id="ssTasks"></tbody></table></div></div>
+        <div class="panel schedule-list-panel"><div class="panel-head"><div><h3>系统订阅服务</h3><p class="muted">由管理员配置并按 Persona 开放</p></div></div><div class="table-wrap"><table class="data-table schedule-services-table"><thead><tr><th>服务名称</th><th>开放 Persona</th><th>订阅人数</th><th>执行计划</th><th>状态</th><th class="col-actions">管理</th></tr></thead><tbody id="ssServices"></tbody></table></div></div>
+        <div class="panel schedule-list-panel" style="margin-top:18px"><div class="panel-head"><div><h3>用户自建任务</h3><p class="muted">用户通过对话创建并确认的个性化任务</p></div></div><div class="table-wrap"><table class="data-table schedule-tasks-table"><thead><tr><th>用户 / Peer</th><th>Bot</th><th>Persona</th><th>任务</th><th>执行计划</th><th>下次执行</th><th>状态</th><th>来源</th><th class="col-actions">管理</th></tr></thead><tbody id="ssTasks"></tbody></table></div></div>
       </section>
 
       <section id="personas">
@@ -5596,7 +5766,7 @@
       el.title = `最近 ${Math.round(ms)}ms · 近 ${state.latencySamples.length} 次均值 ${Math.round(avg)}ms`;
     }
     async function api(path, opts = {}) {
-      setLoading(true);
+      if (!opts.silentLoading) setLoading(true);
       // Heavy admin lists (bots/users/dashboard) need more headroom on remote Redis fleets
       const heavy =
         /\/api\/v1\/admin\/(bots|users|dashboard|system)(\?|$)/.test(path) &&
@@ -5662,7 +5832,7 @@
         throw e;
       } finally {
         if (timer) clearTimeout(timer);
-        setLoading(false);
+        if (!opts.silentLoading) setLoading(false);
       }
     }
 
@@ -8421,10 +8591,10 @@
       const personas = personasData.personas || []; const personaName = (id) => personas.find((p) => p.id === id)?.displayName || id;
       const parseCron = (cron) => { const f=String(cron||"").split(/\s+/); return { time: f.length===5 ? `${String(f[1]).padStart(2,"0")}:${String(f[0]).padStart(2,"0")}` : "08:00", frequency: f[4] === "*" ? "daily" : "weekly", weekday: f[4] || "1" }; };
       const cronFromForm = () => { const [h,m]=$("ssTime").value.split(":").map(Number); return `${m} ${h} * * ${$("ssFrequency").value === "weekly" ? $("ssWeekday").value : "*"}`; };
-      const setServiceForm = (s) => { const c=parseCron(s?.schedule); const weekly=c.frequency==="weekly"; $("ssEditId").value=s?.id||""; $("ssFormTitle").textContent=s?"编辑系统订阅服务":"新建系统订阅服务"; $("ssCreate").textContent=s?"保存服务":"创建服务"; $("ssCancelEdit").hidden=!s; $("ssName").value=s?.name||""; $("ssDescription").value=s?.description||""; $("ssPrompt").value=s?.prompt_template||""; $("ssSchema").value=s?JSON.stringify(s.params_schema||{},null,2):""; $("ssTimezone").value=s?.timezone||"Asia/Shanghai"; $("ssWeb").checked=Boolean(s?.web_search_enabled); $("ssFrequency").value=c.frequency; $("ssWeekday").value=c.weekday; $("ssTime").value=c.time; $("ssWeekdayWrap").hidden=!weekly; $("ssWeekdayWrap").setAttribute("aria-hidden",String(!weekly)); $("ssWeekday").disabled=!weekly; const selected=new Set(s?.personaIds||[]); $("ssPersonas").innerHTML=personas.map(p=>`<option value="${esc(p.id)}" ${selected.has(p.id)?"selected":""}>${esc(p.displayName)}${p.enabled?"":"（停用）"}</option>`).join(""); };
+      const setServiceForm = (s) => { const c=parseCron(s?.schedule); const weekly=c.frequency==="weekly"; $("ssEditId").value=s?.id||""; $("ssFormTitle").textContent=s?"编辑系统订阅服务":"新建系统订阅服务"; $("ssCreate").innerHTML=s?'<i class="bi bi-check-lg"></i>保存服务':'<i class="bi bi-plus-lg"></i>创建服务'; $("ssCancelEdit").hidden=!s; $("ssName").value=s?.name||""; $("ssDescription").value=s?.description||""; $("ssPrompt").value=s?.prompt_template||""; $("ssSchema").value=s?JSON.stringify(s.params_schema||{},null,2):""; $("ssTimezone").value=s?.timezone||"Asia/Shanghai"; $("ssWeb").checked=Boolean(s?.web_search_enabled); $("ssFrequency").value=c.frequency; $("ssWeekday").value=c.weekday; $("ssTime").value=c.time; $("ssWeekdayWrap").hidden=!weekly; $("ssWeekdayWrap").setAttribute("aria-hidden",String(!weekly)); $("ssWeekday").disabled=!weekly; const selected=new Set(s?.personaIds||[]); $("ssPersonas").innerHTML=personas.map(p=>`<option value="${esc(p.id)}" ${selected.has(p.id)?"selected":""}>${esc(p.displayName)}${p.enabled?"":"（停用）"}</option>`).join(""); };
       setServiceForm(services.find(s=>s.id===$("ssEditId").value));
-      $("ssServices").innerHTML = services.length ? services.map((s) => `<tr><td><strong>${esc(s.name)}</strong><div class="muted">${esc(s.description||"")}</div></td><td>${esc((s.personaIds||[]).map(personaName).join("、")||"未开放")}</td><td>${s.subscriberCount||0}</td><td>${esc(s.schedule)}<div class="muted">${esc(s.timezone)}</div></td><td>${s.enabled?'<span class="badge ok">启用</span>':'<span class="badge warn">停用</span>'}</td><td><div class="row-actions"><button class="btn btn-primary btn-sm" data-ss-test="${esc(s.id)}">测试</button><button class="btn btn-secondary btn-sm" data-ss-edit="${esc(s.id)}">编辑</button><button class="btn btn-secondary btn-sm" data-ss-toggle="${esc(s.id)}" data-ss-enabled="${s.enabled?"0":"1"}">${s.enabled?"停用":"启用"}</button><button class="btn btn-danger btn-sm" data-ss-delete="${esc(s.id)}">删除</button></div></td></tr>`).join("") : '<tr><td colspan="6" class="empty">暂无系统订阅服务</td></tr>';
-      $("ssTasks").innerHTML = tasks.length ? tasks.map((t) => `<tr><td>${esc(t.user_id||"—")}<div class="muted">${esc(t.peer_id)}</div></td><td>${esc(t.bot_id)}</td><td>${esc(personaName(t.persona_id))}</td><td><strong>${esc(t.name)}</strong><div class="muted">${esc(t.promptSummary||"")}</div></td><td>${esc(t.schedule)}<div class="muted">${esc(t.timezone)}</div></td><td>${esc(t.next_run_at||"待计算")}</td><td>${t.enabled?'<span class="badge ok">启用</span>':'<span class="badge warn">停用</span>'}</td><td>${esc(t.created_via||"chat")}</td><td><div class="row-actions"><button class="btn btn-secondary btn-sm" data-st-edit="${esc(t.id)}">编辑</button><button class="btn btn-secondary btn-sm" data-st-toggle="${esc(t.id)}" data-st-enabled="${t.enabled?"0":"1"}">${t.enabled?"停用":"启用"}</button><button class="btn btn-danger btn-sm" data-st-delete="${esc(t.id)}">删除</button></div></td></tr>`).join("") : '<tr><td colspan="9" class="empty">暂无用户自建任务</td></tr>';
+      $("ssServices").innerHTML = services.length ? services.map((s) => `<tr><td><div class="cell-stack"><div class="title-line"><strong>${esc(s.name)}</strong></div><div class="meta-line">${esc(s.description||"暂无描述")}</div></div></td><td>${esc((s.personaIds||[]).map(personaName).join("、")||"未开放")}</td><td>${s.subscriberCount||0}</td><td><div class="cell-stack"><code>${esc(s.schedule)}</code><div class="meta-line">${esc(s.timezone)}</div></div></td><td>${s.enabled?'<span class="badge ok">启用</span>':'<span class="badge warn">停用</span>'}</td><td class="col-actions"><div class="row-actions"><button class="btn btn-primary btn-sm" data-ss-test="${esc(s.id)}"><i class="bi bi-play-fill"></i>测试</button><button class="btn btn-secondary btn-sm" data-ss-edit="${esc(s.id)}">编辑</button><button class="btn btn-secondary btn-sm" data-ss-toggle="${esc(s.id)}" data-ss-enabled="${s.enabled?"0":"1"}">${s.enabled?"停用":"启用"}</button><button class="btn btn-danger btn-sm" data-ss-delete="${esc(s.id)}">删除</button></div></td></tr>`).join("") : '<tr><td colspan="6" class="empty">暂无系统订阅服务</td></tr>';
+      $("ssTasks").innerHTML = tasks.length ? tasks.map((t) => `<tr><td><div class="cell-stack"><div class="title-line"><strong>${esc(t.user_id||"—")}</strong></div><div class="meta-line">${esc(t.peer_id)}</div></div></td><td><code>${esc(t.bot_id)}</code></td><td>${esc(personaName(t.persona_id))}</td><td><div class="cell-stack"><div class="title-line"><strong>${esc(t.name)}</strong></div><div class="meta-line">${esc(t.promptSummary||"")}</div></div></td><td><div class="cell-stack"><code>${esc(t.schedule)}</code><div class="meta-line">${esc(t.timezone)}</div></div></td><td>${esc(t.next_run_at||"待计算")}</td><td>${t.enabled?'<span class="badge ok">启用</span>':'<span class="badge warn">停用</span>'}</td><td><span class="badge">${esc(t.created_via||"chat")}</span></td><td class="col-actions"><div class="row-actions"><button class="btn btn-secondary btn-sm" data-st-edit="${esc(t.id)}">编辑</button><button class="btn btn-secondary btn-sm" data-st-toggle="${esc(t.id)}" data-st-enabled="${t.enabled?"0":"1"}">${t.enabled?"停用":"启用"}</button><button class="btn btn-danger btn-sm" data-st-delete="${esc(t.id)}">删除</button></div></td></tr>`).join("") : '<tr><td colspan="9" class="empty">暂无用户自建任务</td></tr>';
       document.querySelectorAll("[data-ss-edit]").forEach((b)=>b.onclick=()=>setServiceForm(services.find(s=>s.id===b.dataset.ssEdit)));
       const skipReasonText = (reason) => {
         const raw = String(reason || "");
@@ -8443,7 +8613,68 @@
           send_failed: "微信发送失败",
         }[raw] || raw;
       };
-      document.querySelectorAll("[data-ss-test]").forEach((b)=>b.onclick=async()=>{const s=services.find(x=>x.id===b.dataset.ssTest);if(!s)return;const ok=await confirmDialog("测试推送",`将向「${s.name}」下已订阅且绑定开放 Persona 的用户发送一次测试结果，不会触达未订阅用户。确认继续？`,{okText:"发送测试"});if(!ok)return;const oldText=b.textContent;b.disabled=true;b.textContent="发送中…";try{const r=await api("/api/v1/admin/scheduled-services/"+encodeURIComponent(s.id)+"/test",{method:"POST",body:{},timeoutMs:180000,timeoutMessage:"测试等待超时，但推送可能已经发送，请勿立即重试"});const reasons=(r.details||[]).map(x=>skipReasonText(x.reason)).join("；");toast(`测试完成：发送 ${r.sent}，跳过 ${r.skipped}${reasons?`（${reasons}）`:""}`,r.skipped>0);}catch(e){toast(e.message||"测试发送失败",true);}finally{b.disabled=false;b.textContent=oldText;}});
+      const scheduledRunText = (run) => {
+        const status = run.status === "running" ? "运行中" : run.status === "completed" ? "已完成" : "失败";
+        const lines = [`状态：${status}`, `开始：${new Date(run.startedAt).toLocaleString()}`, ""];
+        (run.logs || []).forEach((log) => {
+          const time = new Date(log.at).toLocaleTimeString();
+          const peer = log.peerId ? ` [${log.peerId}]` : "";
+          lines.push(`${time} [${log.stage}]${peer} ${log.message}`);
+        });
+        if (run.result) {
+          lines.push("", `结果：发送 ${run.result.sent}，跳过 ${run.result.skipped}，匹配 ${run.result.matched}`);
+          (run.result.details || []).forEach((item) => lines.push(`- ${item.peerId}: ${skipReasonText(item.reason)}`));
+        }
+        if (run.error) lines.push("", `致命错误：${run.error}`);
+        return lines.join("\n");
+      };
+      const renderScheduledRun = (service, run, openIfClosed = false) => {
+        const text = scheduledRunText(run);
+        if (!$("modal").classList.contains("show")) {
+          if (openIfClosed) openModal(`测试日志 · ${service.name}`, "日志每秒自动刷新，关闭弹窗不会停止后台测试。", text);
+          else return;
+        } else {
+          $("modalBody").style.display = "block";
+          $("modalBody").textContent = text;
+          setModalCopy(text);
+          const body = $("modal").querySelector(".modal-body");
+          if (body) body.scrollTop = body.scrollHeight;
+        }
+      };
+      document.querySelectorAll("[data-ss-test]").forEach((b) => b.onclick = async () => {
+        const s = services.find((x) => x.id === b.dataset.ssTest);
+        if (!s) return;
+        const ok = await confirmDialog("测试推送", `将向「${s.name}」下已订阅且绑定开放 Persona 的用户发送一次测试结果，并展示实时执行日志。确认继续？`, {okText:"发送测试"});
+        if (!ok) return;
+        const oldText = b.textContent;
+        b.disabled = true;
+        b.textContent = "运行中…";
+        try {
+          const started = await api("/api/v1/admin/scheduled-services/" + encodeURIComponent(s.id) + "/test", {method:"POST", body:{}, timeoutMs:15000});
+          let run = started.run;
+          renderScheduledRun(s, run, true);
+          while (run.status === "running") {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            const data = await api("/api/v1/admin/scheduled-test-runs/" + encodeURIComponent(run.id), {timeoutMs:12000, silentLoading:true, silentLatency:true});
+            run = data.run;
+            renderScheduledRun(s, run);
+          }
+          const result = run.result;
+          if (run.status === "completed" && result) {
+            toast(`测试完成：发送 ${result.sent}，跳过 ${result.skipped}`, result.skipped > 0);
+          } else {
+            toast(run.error || "测试运行失败，请查看日志", true);
+          }
+        } catch (e) {
+          toast(e.message || "测试发送失败", true);
+          if ($("modal").classList.contains("show")) {
+            $("modalBody").textContent += `\n\n日志查询失败：${e.message || e}`;
+          }
+        } finally {
+          b.disabled = false;
+          b.textContent = oldText;
+        }
+      });
       document.querySelectorAll("[data-ss-toggle]").forEach((b) => b.onclick = async () => { await api("/api/v1/admin/scheduled-services/" + encodeURIComponent(b.dataset.ssToggle), {method:"PUT", body:{enabled:b.dataset.ssEnabled === "1"}}); await loadSchedules(true); });
       document.querySelectorAll("[data-ss-delete]").forEach((b) => b.onclick = async () => { if (!await confirmDialog("删除服务", "会阻止后续执行，确认删除？")) return; await api("/api/v1/admin/scheduled-services/" + encodeURIComponent(b.dataset.ssDelete), {method:"DELETE"}); await loadSchedules(true); });
       document.querySelectorAll("[data-st-toggle]").forEach((b) => b.onclick = async () => { await api("/api/v1/admin/scheduled-tasks/" + encodeURIComponent(b.dataset.stToggle) + "/manage", {method:"POST", body:{enabled:b.dataset.stEnabled === "1"}}); await loadSchedules(true); });

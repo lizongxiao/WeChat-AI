@@ -1070,7 +1070,7 @@ export class BotWorkerManager {
   }
 
   /** Scheduled replies use the normal text sanitizer and iLink sender.
-   * Weather bulletins may be multiple paragraph bubbles (not the 5-bubble chat cap). */
+   * Weather bulletins are packed into ≤3 bubbles (not the 5-bubble chat cap). */
   private async sendScheduledReply(
     botId: string,
     peerId: string,
@@ -1101,7 +1101,7 @@ export class BotWorkerManager {
       // to contain newlines / fail. Do not honor splitReply=false.
       const ownerUserId = reply.ownerUserId || "";
       for (let i = 0; i < parts.length; i++) {
-        if (i > 0) await sleep(rand(280, 640));
+        if (i > 0) await sleep(rand(480, 900));
         const latest =
           (await getContextToken(this.opts.db, botId, peerId)) || contextToken;
         try {

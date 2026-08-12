@@ -649,17 +649,69 @@ export function normalizeScheduledLayout(text: string): string {
 }
 
 /**
- * One WeChat bubble per non-empty line. iLink `text_item` does not reliably
- * keep in-message newlines (they are flattened or the send is rejected), so
- * weather fields must be separate sendmessage calls.
+ * iLink `text_item` does not keep in-message newlines (flattened or rejected).
+ * Too many consecutive sendmessage calls also hit WeChat frequency limits, so
+ * pack a bulletin into at most three newline-free bubbles:
+ * greeting | weather block | 寄语 + closing.
  */
+export const MAX_SCHEDULED_BUBBLES = 3;
+
+const SCHEDULED_WEATHER_LINE =
+  /^(?:🌤️|🌤|🌡️|🌡|☁️|☁|🌧️|🌧|💨|👕|☂️|☂)/u;
+const SCHEDULED_QUOTE_LINE = /今日寄语/;
+
+function joinScheduledBubble(lines: string[]): string {
+  return lines
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+function packLineGroups(groups: string[][]): string[] {
+  return groups.map(joinScheduledBubble).filter(Boolean);
+}
+
+function packLinesEvenly(lines: string[], max: number): string[] {
+  const clean = lines.map((s) => s.trim()).filter(Boolean);
+  if (clean.length <= max) return clean;
+  const size = Math.ceil(clean.length / max);
+  const groups: string[][] = [];
+  for (let i = 0; i < clean.length; i += size) {
+    groups.push(clean.slice(i, i + size));
+  }
+  return packLineGroups(groups).slice(0, max);
+}
+
 export function splitScheduledBulletin(text: string): string[] {
   const normalized = normalizeScheduledLayout(text);
   if (!normalized) return [];
-  return normalized
+  const lines = normalized
     .split(/\n+/)
     .map((s) => s.trim())
     .filter(Boolean);
+  if (!lines.length) return [];
+
+  const greeting: string[] = [];
+  const weather: string[] = [];
+  const closing: string[] = [];
+  let stage: "greeting" | "weather" | "closing" = "greeting";
+  for (const line of lines) {
+    if (stage === "greeting" && SCHEDULED_WEATHER_LINE.test(line)) {
+      stage = "weather";
+    } else if (stage !== "closing" && SCHEDULED_QUOTE_LINE.test(line)) {
+      stage = "closing";
+    }
+    if (stage === "greeting") greeting.push(line);
+    else if (stage === "weather") weather.push(line);
+    else closing.push(line);
+  }
+
+  if (weather.length === 0 && closing.length === 0) {
+    return packLinesEvenly(lines, MAX_SCHEDULED_BUBBLES);
+  }
+  return packLineGroups([greeting, weather, closing]);
 }
 
 /** Proactive outreach: no new user message; model may skip. */

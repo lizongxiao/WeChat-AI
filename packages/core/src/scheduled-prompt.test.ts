@@ -139,20 +139,31 @@ describe("scheduled prompt contract", () => {
     assert.deepEqual(scheduledOutputIssues(taskPrompt, fixed).filter((x) => x.includes("换行")), []);
   });
 
-  it("keeps 「今日寄语 together and splits bulletin into WeChat bubbles", () => {
+  it("keeps 「今日寄语 together and packs the bulletin into 3 WeChat bubbles", () => {
     const smashed =
       "夜里好呀～快12点了。🌤️ 深圳今日天气｜8月12日 周三🌡️ 温度：26℃ ～ 31℃☁️ 天气：多云转阴🌧️ 降雨：有阵雨概率💨 风力：东南风 2～3 级👕 穿衣：短袖就行☂️ 出行：伞带好「今日寄语：热气退一点，人也轻松一点。」这么晚了还没睡呀？";
     const fixed = normalizeScheduledLayout(smashed);
     assert.match(fixed, /\n\n「今日寄语：/);
     assert.doesNotMatch(fixed, /「\n+今日寄语/);
     const chunks = splitScheduledBulletin(fixed);
-    assert.ok(chunks.length >= 8, JSON.stringify(chunks));
+    assert.equal(chunks.length, 3, JSON.stringify(chunks));
     assert.match(chunks[0]!, /夜里好/);
-    assert.equal(chunks.filter((c) => c.startsWith("🌤️")).length, 1);
-    assert.ok(chunks.some((c) => c.startsWith("🌡️") || c.startsWith("🌡")));
+    assert.match(chunks[1]!, /^🌤️/);
+    assert.match(chunks[1]!, /🌡️|🌡/);
+    assert.match(chunks[1]!, /👕/);
+    assert.match(chunks[1]!, /☂️|☂/);
     assert.ok(chunks.every((c) => !c.includes("\n")));
-    assert.ok(chunks.some((c) => c.includes("今日寄语")));
-    assert.match(chunks[chunks.length - 1]!, /还没睡/);
+    assert.match(chunks[2]!, /今日寄语/);
+    assert.match(chunks[2]!, /还没睡/);
+  });
+
+  it("packs a non-weather scheduled note into at most 3 bubbles", () => {
+    const lines = Array.from({ length: 9 }, (_, i) => `提醒事项 ${i + 1}`);
+    const chunks = splitScheduledBulletin(lines.join("\n"));
+    assert.equal(chunks.length, 3, JSON.stringify(chunks));
+    assert.ok(chunks.every((c) => !c.includes("\n")));
+    assert.match(chunks[0]!, /提醒事项 1/);
+    assert.match(chunks[2]!, /提醒事项 9/);
   });
 
   it("uses the overall length bound, not the 寄语 subsection bound", () => {

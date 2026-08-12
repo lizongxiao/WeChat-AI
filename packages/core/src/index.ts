@@ -21,6 +21,7 @@ export {
   normalizeScheduledLayout,
   parseFactsJson,
   parseProactiveSkip,
+  MAX_SCHEDULED_BUBBLES,
   splitScheduledBulletin,
   type AttachmentKind,
   type PromptAttachment,

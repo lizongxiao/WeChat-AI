@@ -1233,8 +1233,8 @@ export class ChatService {
       };
     }
     // Do not run the ordinary multi-bubble / reply-filter pipeline: it caps at
-    // five parts and can flatten the weather layout. Normalize + paragraph-split
-    // instead so WeChat gets separate bubbles (in-message newlines are unreliable).
+    // five parts and can flatten the weather layout. Pack into ≤3 newline-free
+    // bubbles — iLink rejects in-message `\n`, and per-line sends hit rate limits.
     const deliveryText = normalizeScheduledLayout(usage.text);
     if (!deliveryText.trim()) return { kind: "skip", skipReason: "empty_reply" };
     const bubbles = splitScheduledBulletin(deliveryText);

@@ -1547,6 +1547,54 @@ export async function registerRoutes(
     };
   });
 
+  app.get<{
+    Querystring: { botAccountId?: string; peerId?: string; limit?: string };
+  }>("/api/v1/me/peers/messages", async (req, reply) => {
+    const user = await requireUser(req, reply, ctx);
+    if (!user) return;
+    const { botAccountId, peerId } = req.query;
+    if (!botAccountId || !peerId) {
+      return reply
+        .code(400)
+        .send({ error: "botAccountId and peerId required" });
+    }
+    const bot = await getBotAccount(ctx.db, botAccountId);
+    if (!bot || (bot.owner_user_id !== user.id && !user.is_admin)) {
+      return reply.code(403).send({ error: "forbidden" });
+    }
+    const peer = (await listPeers(ctx.db, botAccountId)).find(
+      (item) => item.peer_id === peerId,
+    );
+    if (!peer) return reply.code(404).send({ error: "peer_not_found" });
+
+    const parsedLimit = Number.parseInt(req.query.limit ?? "200", 10);
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(parsedLimit, 1), 500)
+      : 200;
+    const messages = await listRecentMessages(
+      ctx.db,
+      botAccountId,
+      peerId,
+      limit,
+    );
+    return {
+      peer: {
+        id: peer.peer_id,
+        displayName: peer.display_name,
+        remark: peer.remark ?? null,
+      },
+      messages: messages
+        .filter((message) => message.role !== "system")
+        .map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          personaId: message.persona_id,
+          createdAt: message.created_at,
+        })),
+    };
+  });
+
   app.patch<{
     Body: { botAccountId: string; peerId: string; enabled: boolean };
   }>("/api/v1/me/peers/proactive", async (req, reply) => {

@@ -2126,6 +2126,80 @@
       border: 1px solid var(--separator);
       color: var(--text);
     }
+    .peer-history-card {
+      width: min(680px, 100%);
+      max-height: min(88vh, 820px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .peer-history-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .peer-history-head h3 { margin-bottom: 4px; }
+    .peer-history-sub {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 12px;
+      word-break: break-all;
+    }
+    .peer-history-log {
+      flex: 1;
+      min-height: 240px;
+      margin-top: 16px;
+      padding: 14px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      border: 1px solid var(--separator);
+      border-radius: var(--radius-sm);
+      background: var(--chip);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .peer-history-item {
+      max-width: 86%;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .peer-history-item.user { align-self: flex-end; align-items: flex-end; }
+    .peer-history-item.assistant { align-self: flex-start; align-items: flex-start; }
+    .peer-history-bubble {
+      padding: 9px 12px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .peer-history-item.user .peer-history-bubble {
+      border-bottom-right-radius: 4px;
+      background: var(--blue);
+      color: #fff;
+    }
+    .peer-history-item.assistant .peer-history-bubble {
+      border-bottom-left-radius: 4px;
+      background: var(--surface);
+      border: 1px solid var(--separator);
+      color: var(--text);
+    }
+    .peer-history-time {
+      padding: 0 3px;
+      color: var(--text-tertiary, var(--text-secondary));
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    .peer-history-empty {
+      margin: auto;
+      color: var(--text-secondary);
+      font-size: 14px;
+      text-align: center;
+    }
     .try-chat-thinking {
       align-self: flex-start;
       max-width: 88%;
@@ -3235,6 +3309,23 @@
       <div class="row-actions try-chat-actions">
         <button class="btn btn-secondary" type="button" id="tryChatFork"><i class="bi bi-shuffle" aria-hidden="true"></i>改编</button>
         <button class="btn btn-secondary" type="button" id="tryChatAdd"><i class="bi bi-plus-lg" aria-hidden="true"></i>加入库</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 微信用户对话历史 -->
+  <div class="modal-backdrop" id="peerHistoryModal" role="dialog" aria-modal="true" aria-labelledby="peerHistoryTitle">
+    <div class="modal peer-history-card glass glass-strong glass-rim">
+      <div class="modal-handle" aria-hidden="true"></div>
+      <div class="peer-history-head">
+        <div>
+          <h3 id="peerHistoryTitle">对话历史</h3>
+          <p class="peer-history-sub" id="peerHistorySub"></p>
+        </div>
+        <button class="btn btn-ghost btn-sm" type="button" id="peerHistoryClose" aria-label="关闭"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
+      </div>
+      <div class="peer-history-log" id="peerHistoryLog">
+        <p class="peer-history-empty">正在加载…</p>
       </div>
     </div>
   </div>
@@ -4524,6 +4615,63 @@
       const key = `${p.bot_account_id}|${p.peer_id}`;
       return `<select class="persona-select" data-asg="${esc(key)}" title="${esc(p.personaName || "选择人设")}">${peerPersonaOpts(p)}</select>`;
     }
+    function closePeerHistory() {
+      $("peerHistoryModal")?.classList.remove("show");
+    }
+    function formatPeerHistoryTime(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      return date.toLocaleString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+    }
+    async function openPeerHistory(botAccountId, peerId) {
+      const modal = $("peerHistoryModal");
+      const log = $("peerHistoryLog");
+      const sub = $("peerHistorySub");
+      const peer = (state.peers || []).find(
+        (item) => item.bot_account_id === botAccountId && item.peer_id === peerId,
+      );
+      const peerName = peer?.remark || peer?.display_name || peerId;
+      sub.textContent = `${peerName} · 最近 200 条`;
+      log.innerHTML = '<p class="peer-history-empty">正在加载…</p>';
+      modal.classList.add("show");
+      try {
+        const data = await api(
+          "/api/v1/me/peers/messages?botAccountId=" +
+            encodeURIComponent(botAccountId) +
+            "&peerId=" +
+            encodeURIComponent(peerId) +
+            "&limit=200",
+        );
+        if (!modal.classList.contains("show")) return;
+        const messages = data.messages || [];
+        sub.textContent = `${peerName} · 共显示 ${messages.length} 条`;
+        if (!messages.length) {
+          log.innerHTML = '<p class="peer-history-empty">暂无对话记录</p>';
+          return;
+        }
+        log.innerHTML = messages
+          .map((message) => {
+            const role = message.role === "user" ? "user" : "assistant";
+            const label = role === "user" ? "微信用户" : "机器人";
+            const time = formatPeerHistoryTime(message.createdAt);
+            return `<div class="peer-history-item ${role}">
+              <div class="peer-history-bubble">${esc(message.content)}</div>
+              <span class="peer-history-time">${label}${time ? ` · ${esc(time)}` : ""}</span>
+            </div>`;
+          })
+          .join("");
+        log.scrollTop = log.scrollHeight;
+      } catch (e) {
+        log.innerHTML = `<p class="peer-history-empty">${esc(e.message || "对话历史加载失败")}</p>`;
+      }
+    }
     function peerActionsHtml(p) {
       const key = `${p.bot_account_id}|${p.peer_id}`;
       return `<div class="row-actions">
@@ -4534,6 +4682,7 @@
         }
         <button class="btn btn-secondary btn-sm" type="button" data-as="${esc(key)}">分配人设</button>
         <button class="btn btn-secondary btn-sm" type="button" data-sub="${esc(key)}" ${p.approved ? "" : "disabled title=\"请先批准用户\""}>订阅服务</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-history="${esc(key)}">对话历史</button>
         <button class="btn btn-ghost btn-sm" type="button" data-remark="${esc(key)}">备注</button>
         <button class="btn btn-ghost btn-sm" type="button" data-mem="${esc(key)}">记忆</button>
       </div>`;
@@ -4678,6 +4827,12 @@
           } catch (e) { toast(e.message || "无法获取可订阅服务", true); }
         };
       });
+      document.querySelectorAll("[data-history]").forEach((btn) => {
+        btn.onclick = () => {
+          const [botAccountId, peerId] = btn.dataset.history.split("|");
+          void openPeerHistory(botAccountId, peerId);
+        };
+      });
       document.querySelectorAll("[data-remark]").forEach((btn) => {
         btn.onclick = async () => {
           const [botAccountId, peerId] = btn.dataset.remark.split("|");
@@ -4814,6 +4969,18 @@
         };
       });
     }
+    $("peerHistoryClose")?.addEventListener("click", closePeerHistory);
+    $("peerHistoryModal")?.addEventListener("click", (event) => {
+      if (event.target === $("peerHistoryModal")) closePeerHistory();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (
+        event.key === "Escape" &&
+        $("peerHistoryModal")?.classList.contains("show")
+      ) {
+        closePeerHistory();
+      }
+    });
     async function loadPeers() {
       const botId = $("filterBot").value;
       const q = botId ? "?botId=" + encodeURIComponent(botId) : "";

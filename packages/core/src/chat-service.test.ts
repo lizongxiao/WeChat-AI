@@ -364,7 +364,7 @@ describe("ChatService multi-user isolation (Redis)", () => {
     await db.close();
   });
 
-  it("never pushes a fresh-data schedule the model answered without searching", async (t) => {
+  it("fetches fresh data server-side before asking the persona to write", async (t) => {
     let db;
     try { db = openDatabase(redisUrl); await Promise.race([db.ping(), new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2500))]); }
     catch { try { await db?.close(); } catch {} t.skip("Redis not available"); return; }
@@ -375,14 +375,17 @@ describe("ChatService multi-user isolation (Redis)", () => {
     await upsertBotAccount(db,{id:botId,ownerUserId:"u_test",displayName:"test",botToken:"test-token"});
     await approvePeer(db,botId,peerId);
     await setAssignment(db,botId,peerId,cat!.id);
-    // Answer looks plausible, but no web_search ran — that is invented weather.
-    const chat=new ChatService(db,asLlm(new FakeLlm("今天多云 28~34℃")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,toolsBaseUrl:"https://tools.test",toolsApiKey:"tk"});
-    const result=await chat.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天的天气",webSearchEnabled:true,source:"subscription"});
-    const searched=new ChatService(db,asLlm(new FakeLlm("今天多云 28~34℃",["web_search"])),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,toolsBaseUrl:"https://tools.test",toolsApiKey:"tk"});
-    const delivered=await searched.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天的天气",webSearchEnabled:true,source:"subscription"});
+    let searchQuery="";
+    const fake=new FakeLlm("今天多云 28~34℃");
+    const chat=new ChatService(db,asLlm(fake),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,webSearchRunner:async(query)=>{searchQuery=query;return "上海：多云，28~34℃，东南风";}});
+    const result=await chat.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天上海的天气",webSearchEnabled:true,source:"subscription"});
+    const failed=new ChatService(db,asLlm(new FakeLlm("不应发送")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,webSearchRunner:async()=>{throw new Error("search down");}});
+    const blocked=await failed.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天上海的天气",webSearchEnabled:true,source:"subscription"});
     await db.close();
-    assert.equal(result.kind,"skip");
-    assert.equal(result.skipReason,"web_search_not_performed");
-    assert.equal(delivered.kind,"reply","a schedule that really searched must still be sent");
+    assert.equal(result.kind,"reply");
+    assert.match(searchQuery,/上海.*天气/);
+    assert.match(JSON.stringify(fake.lastMessages),/28~34℃/);
+    assert.equal(blocked.kind,"skip");
+    assert.match(blocked.skipReason??"",/^web_search_failed:/);
   });
 });

@@ -93,6 +93,8 @@ export interface ChatServiceOptions {
   toolsApiKey?: string;
   /** Wall clock for one tools-gateway search call */
   toolsTimeoutMs?: number;
+  /** Test/deployment adapter for server-side scheduled-task web searches. */
+  webSearchRunner?: (query: string, maxResults?: number) => Promise<string>;
   /** Decrypt user custom LLM keys; required for persona llm_provider_id */
   llmProviderSecret?: string;
   /** Host allowlist for chatflow http nodes (plus tools host) */
@@ -150,6 +152,47 @@ export interface ScheduledChatRequest {
   /** Logical schedule time, which can differ from wall time during a preview. */
   executionTime?: string;
   timeZone?: string;
+}
+
+function scheduledSearchQuery(
+  prompt: string,
+  executionTime: string,
+  timeZone: string,
+): string {
+  const date = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(executionTime));
+  if (/天气/.test(prompt)) {
+    const location =
+      prompt.match(/🌤️\s*([^\n｜|]{1,40}?)\s*今日天气/)?.[1]?.trim() ||
+      prompt
+        .match(
+          /(?:今天|今日)\s*([^，。\n]{1,40}?)\s*(?:的)?(?:最新)?天气/,
+        )?.[1]
+        ?.trim() ||
+      "";
+    return `${date} ${location} 天气 最低温 最高温 降雨 风向 风力`.replace(
+      /\s+/g,
+      " ",
+    );
+  }
+  const task = prompt.replace(/\s+/g, " ").trim().slice(0, 240);
+  return `${date} ${task}`;
+}
+
+function hasUsableSearchResults(value: string): boolean {
+  const text = value.trim();
+  if (!text) return false;
+  try {
+    const parsed = JSON.parse(text) as { results?: unknown; error?: unknown };
+    if (parsed.error) return false;
+    return !Array.isArray(parsed.results) || parsed.results.length > 0;
+  } catch {
+    return true;
+  }
 }
 
 export interface InboundChatResult {
@@ -941,11 +984,39 @@ export class ChatService {
     // cannot safely accept an arbitrary persisted instruction as a graph input.
     if (persona.mode === "chatflow") return { kind: "skip", skipReason: "chatflow_unsupported" };
     this.syncWebSearch();
+    const executionTime = req.executionTime ?? new Date().toISOString();
+    const timeZone =
+      req.timeZone ?? this.opts.timeToolTimeZone ?? "Asia/Shanghai";
     if (
       req.webSearchEnabled &&
-      (this.opts.webSearchEnabled !== true || !this.webSearch)
+      (this.opts.webSearchEnabled !== true ||
+        (!this.opts.webSearchRunner && !this.webSearch))
     ) {
       return { kind: "skip", skipReason: "web_search_unavailable" };
+    }
+    let webSearchContext: string | undefined;
+    if (req.webSearchEnabled) {
+      const query = scheduledSearchQuery(req.prompt, executionTime, timeZone);
+      try {
+        webSearchContext = this.opts.webSearchRunner
+          ? await this.opts.webSearchRunner(
+              query,
+              this.opts.webSearchMaxResults ?? 5,
+            )
+          : await this.webSearch!.searchAsToolResult(
+              query,
+              this.opts.webSearchMaxResults ?? 5,
+            );
+        if (!hasUsableSearchResults(webSearchContext)) {
+          return { kind: "skip", skipReason: "web_search_failed:no_results" };
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        return {
+          kind: "skip",
+          skipReason: `web_search_failed:${reason.slice(0, 200)}`,
+        };
+      }
     }
     const [systemPrompt, bot, memories] = await Promise.all([
       getPublishedPrompt(this.db, persona.id), getBotAccount(this.db, req.botAccountId),
@@ -961,22 +1032,18 @@ export class ChatService {
       scheduledPrompt: req.prompt,
       botName,
       personaName: persona.display_name,
-      executionTime: req.executionTime ?? new Date().toISOString(),
-      timeZone: req.timeZone ?? this.opts.timeToolTimeZone ?? "Asia/Shanghai",
+      executionTime,
+      timeZone,
       webSearchRequired: req.webSearchEnabled,
+      webSearchContext,
       trustedInstruction: req.source === "subscription",
     });
     const { client, callOpts } = await this.resolveChatClient({
       persona,
       ownerUserId: bot?.owner_user_id,
-      forceWebSearch: req.webSearchEnabled,
       includeTimeTool: false,
     });
-    // `requireToolUse` is only a request: reasoning models reject a forced tool
-    // choice, so the search has to be confirmed after the fact instead.
-    callOpts.requireToolUse = req.webSearchEnabled;
     let usage = await client.chatWithUsage(messages, callOpts);
-    let searched = usage.toolsUsed?.includes("web_search") === true;
     let issues = scheduledOutputIssues(req.prompt, usage.text);
     if (issues.length) {
       const retryMessages = [
@@ -994,14 +1061,10 @@ export class ChatService {
         completionTokens: usage.completionTokens + retry.completionTokens,
         totalTokens: usage.totalTokens + retry.totalTokens,
       };
-      searched = searched || retry.toolsUsed?.includes("web_search") === true;
       issues = scheduledOutputIssues(req.prompt, usage.text);
     }
     const owner = bot?.owner_user_id ? await getUser(this.db, bot.owner_user_id) : undefined;
     await recordTokenUsage(this.db, { userId: bot?.owner_user_id, botId: req.botAccountId, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, username: owner?.username, botName: bot?.display_name });
-    if (req.webSearchEnabled && !searched) {
-      return { kind: "skip", skipReason: "web_search_not_performed" };
-    }
     if (issues.length) {
       return {
         kind: "skip",

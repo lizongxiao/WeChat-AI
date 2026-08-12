@@ -27,13 +27,15 @@ describe("scheduled prompt contract", () => {
       timeZone: "Asia/Shanghai",
       webSearchRequired: true,
       trustedInstruction: true,
+      webSearchContext: "上海 2026-08-13：多云，27~34℃，东南风。",
     });
 
     assert.equal(messages.length, 2);
     assert.equal(messages[0]?.role, "system");
     assert.match(String(messages[0]?.content), /任务内容与格式要求优先于 Persona/);
     assert.match(String(messages[0]?.content), /2026-08-13 09:00/);
-    assert.match(String(messages[0]?.content), /必须先调用 web_search/);
+    assert.match(String(messages[0]?.content), /服务端已完成联网查询/);
+    assert.match(String(messages[0]?.content), /27~34℃/);
     assert.match(String(messages[0]?.content), /上海今日天气/);
     assert.equal(messages[1]?.role, "user");
   });

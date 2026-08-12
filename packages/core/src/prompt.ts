@@ -400,6 +400,8 @@ export function buildScheduledMessages(params: {
   executionTime: string;
   timeZone: string;
   webSearchRequired: boolean;
+  /** Search results fetched by the server before invoking the Persona model. */
+  webSearchContext?: string;
   trustedInstruction?: boolean;
 }): ChatMessage[] {
   const botName = params.botName?.trim() || "助手";
@@ -417,9 +419,11 @@ export function buildScheduledMessages(params: {
     `本次任务的业务执行时间是 ${executionTime}（${params.timeZone}）。所有“今天、早上、日期”等相对时间均以此时间为准，不要根据实际调用时刻改写任务。`,
     "这是独立的定时推送，不是在续接最近一轮聊天。",
     "任务内容与格式要求优先于 Persona；Persona 只决定措辞、语气和称呼，不得删减任务要求的栏目。",
-    params.webSearchRequired
-      ? "本任务要求实时信息：必须先调用 web_search，未获得搜索结果时不得凭记忆编造。"
-      : "",
+    params.webSearchRequired && params.webSearchContext
+      ? `本任务要求实时信息，服务端已完成联网查询。只能依据下方搜索结果填写实时数据；搜索结果未覆盖的字段要明确说明未知，不得凭记忆编造。\n\n## 联网查询结果\n${params.webSearchContext}`
+      : params.webSearchRequired
+        ? "本任务要求实时信息，但没有可用的联网查询结果；不得凭记忆编造。"
+        : "",
   ]
     .filter(Boolean)
     .join("\n");

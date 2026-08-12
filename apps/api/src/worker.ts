@@ -66,6 +66,7 @@ import {
   sanitizePartsStripStickerJson,
   stripAllStickerJson,
   type ChatService,
+  type InboundChatResult,
   type HumanDelayOptions,
   type P2PServiceOptions,
   type PromptAttachment,
@@ -87,6 +88,7 @@ import {
 import { ScheduledScheduler } from "./scheduled-scheduler.js";
 import { handleScheduledChatTool } from "./scheduled-chat-tools.js";
 import { emitActivity, previewText } from "./activity-stream.js";
+import { scheduledReplyParts } from "./scheduled-reply-delivery.js";
 
 /**
  * How often a node sweeps the load-weight hash (refresh live entries, delete
@@ -894,7 +896,7 @@ export class BotWorkerManager {
       intervalSec: 30,
       lockTtlSec: 120,
       log: this.opts.log,
-      sendText: (botId, peerId, text) => this.adminSendText(botId, peerId, text),
+      sendReply: (botId, peerId, reply) => this.sendScheduledReply(botId, peerId, reply),
     });
     this.scheduled.start();
   }
@@ -964,6 +966,47 @@ export class BotWorkerManager {
       this.opts.log?.(
         `[worker] adminSendText failed bot=${botId} peer=${peerId}: ${message}`,
       );
+      return { ok: false, reason: "ilink_error", error: message };
+    }
+  }
+
+  /** Scheduled replies deliberately share the same part sanitizer and sender as
+   * ordinary chat. Sending `result.text` in one admin push made iLink render
+   * line-oriented replies as one paragraph on some clients. */
+  private async sendScheduledReply(
+    botId: string,
+    peerId: string,
+    reply: InboundChatResult,
+  ): Promise<AdminSendResult> {
+    let parts: ReplyPart[] = scheduledReplyParts(reply);
+    parts = sanitizePartsStripStickerJson(parts, this.maxStickersPerReply());
+    if (!parts.length) return { ok: false, reason: "empty" };
+
+    let client = this.clients.get(botId);
+    let contextToken: string | null = null;
+    if (client) {
+      contextToken = await getContextToken(this.opts.db, botId, peerId);
+      if (!contextToken) return { ok: false, reason: "no_context_token" };
+    } else {
+      const [token, creds] = await Promise.all([
+        getContextToken(this.opts.db, botId, peerId),
+        getBotCredentials(this.opts.db, botId),
+      ]);
+      contextToken = token;
+      if (!contextToken) return { ok: false, reason: "no_context_token" };
+      if (!creds?.botToken) return { ok: false, reason: "no_credentials" };
+      client = new ILinkClient({ botToken: creds.botToken, baseUrl: creds.baseUrl ?? undefined });
+    }
+    try {
+      if (this.opts.splitReply === false || parts.length === 1) {
+        await this.sendReplyPart(client, peerId, contextToken, parts[0]!, reply.ownerUserId || "");
+      } else {
+        await this.sendHumanParts(client, peerId, contextToken, parts, reply.ownerUserId || "");
+      }
+      return { ok: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.opts.log?.(`[worker] scheduled reply failed bot=${botId} peer=${peerId}: ${message}`);
       return { ok: false, reason: "ilink_error", error: message };
     }
   }

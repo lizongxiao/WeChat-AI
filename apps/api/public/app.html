@@ -4643,13 +4643,21 @@
                 if ((service.paramsSchema?.required || []).includes(input.dataset.peerSubParam) && !value) valid = false;
               });
               if (!valid) { toast("请填写必填订阅参数", true); return; }
-              const ok = await confirmDialog({ title: "确认订阅", message: `将为该微信用户订阅「${service.name}」，并绑定当前人设「${data.peer.personaName}」。`, okText: "确认订阅", danger: false });
-              if (!ok) return;
+              // This sheet is already the explicit confirmation step. Opening
+              // the global confirm sheet here would leave two modal backdrops
+              // visible at once and make the action look broken.
+              const saveButton = card.querySelector("#peerSubSave");
+              saveButton.disabled = true;
+              saveButton.textContent = "正在订阅…";
               try {
                 await api("/api/v1/me/peer-subscriptions", { method: "POST", body: { botId, peerId, serviceId: service.id, params } });
                 toast("订阅已创建");
                 close();
-              } catch (e) { toast(e.message || "订阅失败", true); }
+              } catch (e) {
+                saveButton.disabled = false;
+                saveButton.textContent = "确认订阅";
+                toast(e.message || "订阅失败", true);
+              }
             };
           } catch (e) { toast(e.message || "无法获取可订阅服务", true); }
         };

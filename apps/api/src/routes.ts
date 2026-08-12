@@ -163,6 +163,28 @@ import {
   getLlmProvider,
   toPublicProvider,
   getPublishedGraph,
+  createScheduledTask,
+  deleteScheduledTask,
+  getScheduledTask,
+  listScheduledTasks,
+  updateScheduledTask,
+  createUserSubscription,
+  deleteUserSubscription,
+  listUserSubscriptions,
+  updateUserSubscription,
+  getSystemSubscriptionService,
+  listSystemSubscriptionServices,
+  saveSystemSubscriptionService,
+  deleteSystemSubscriptionService,
+  setServicePersonas,
+  listServicePersonaIds,
+  isServiceOpenToPersona,
+  savePendingScheduledPlan,
+  getPendingScheduledPlan,
+  clearPendingScheduledPlan,
+  validateSubscriptionParams,
+  setPersonaServiceIds,
+  listPersonaServiceIds,
 } from "@wechat-ai/db";
 import {
   mergeBotProactiveConfig,
@@ -1658,6 +1680,7 @@ export async function registerRoutes(
       return {
         persona: personaPublicDto(p, {
           systemPrompt: prompt,
+          serviceIds: await listPersonaServiceIds(ctx.db, p.id),
           graph: graph ?? null,
           inLibrary,
         }),
@@ -4306,6 +4329,40 @@ export async function registerRoutes(
     return { usage: await getUsageDayStats(ctx.db, day) };
   });
 
+  // ── User scheduling tools. These endpoints are intentionally two-step:
+  // no caller (including an LLM integration) can create/delete directly. ──
+  app.post<{ Body:{ botId:string; peerId:string; personaId:string; name:string; prompt:string; schedule:string; timezone?:string; webSearchEnabled?:boolean } }>("/api/v1/me/scheduled-tasks/prepare", async(req,reply)=>{
+    const user=await requireUser(req,reply,ctx);if(!user)return;const b=req.body;if(!b?.botId||!b.peerId||!b.personaId||!b.name||!b.prompt||!b.schedule)return reply.code(400).send({error:"missing_fields"});
+    const bot=await getBotAccount(ctx.db,b.botId);if(!bot||bot.owner_user_id!==user.id)return reply.code(403).send({error:"bot_not_owned"}); if(!(await userCanUsePersona(ctx.db,user.id,b.personaId)))return reply.code(403).send({error:"persona_not_available"});
+    const payload={name:b.name.trim(),prompt:b.prompt.trim(),schedule:b.schedule.trim(),timezone:b.timezone||"Asia/Shanghai",web_search_enabled:b.webSearchEnabled?1:0};await savePendingScheduledPlan(ctx.db,{kind:"task",user_id:user.id,bot_id:b.botId,peer_id:b.peerId,persona_id:b.personaId,payload,created_at:new Date().toISOString()});return {ok:true,plan:payload,expiresInSec:600};
+  });
+  app.post<{ Body:{ botId:string; peerId:string; confirm:boolean } }>("/api/v1/me/scheduled-tasks/confirm",async(req,reply)=>{const user=await requireUser(req,reply,ctx);if(!user)return;const b=req.body;const plan=await getPendingScheduledPlan(ctx.db,b?.botId||"",b?.peerId||"");if(!plan||plan.user_id!==user.id||plan.kind!=="task")return reply.code(404).send({error:"pending_plan_not_found"});if(!b.confirm)return reply.code(400).send({error:"explicit_confirmation_required"});const p=plan.payload;const task=await createScheduledTask(ctx.db,{user_id:user.id,bot_id:plan.bot_id,peer_id:plan.peer_id,persona_id:plan.persona_id,name:String(p.name),prompt:String(p.prompt),schedule:String(p.schedule),timezone:String(p.timezone),web_search_enabled:Number(p.web_search_enabled)||0,enabled:1});await clearPendingScheduledPlan(ctx.db,plan.bot_id,plan.peer_id);return {ok:true,task};});
+  app.get("/api/v1/me/scheduled-tasks",async(req,reply)=>{const user=await requireUser(req,reply,ctx);if(!user)return;return {tasks:await listScheduledTasks(ctx.db,user.id),subscriptions:await listUserSubscriptions(ctx.db,user.id)};});
+  app.post<{ Body:{ botId:string; peerId:string; personaId:string; serviceId:string; params?:Record<string,unknown> } }>("/api/v1/me/subscriptions/prepare",async(req,reply)=>{const user=await requireUser(req,reply,ctx);if(!user)return;const b=req.body;const [bot,svc]=await Promise.all([getBotAccount(ctx.db,b?.botId||""),getSystemSubscriptionService(ctx.db,b?.serviceId||"")]);if(!bot||bot.owner_user_id!==user.id)return reply.code(403).send({error:"bot_not_owned"});if(!svc?.enabled||!(await isServiceOpenToPersona(ctx.db,svc.id,b.personaId)))return reply.code(403).send({error:"service_not_available_for_persona"});const params=b.params||{};const invalid=validateSubscriptionParams(svc.params_schema,params);if(invalid.length)return reply.code(400).send({error:"invalid_service_params",details:invalid});await savePendingScheduledPlan(ctx.db,{kind:"subscription",user_id:user.id,bot_id:b.botId,peer_id:b.peerId,persona_id:b.personaId,payload:{service_id:svc.id,params},created_at:new Date().toISOString()});return {ok:true,service:{id:svc.id,name:svc.name,schedule:svc.schedule,timezone:svc.timezone},expiresInSec:600};});
+  app.post<{ Body:{botId:string;peerId:string;confirm:boolean} }>("/api/v1/me/subscriptions/confirm",async(req,reply)=>{const user=await requireUser(req,reply,ctx);if(!user)return;const b=req.body;const plan=await getPendingScheduledPlan(ctx.db,b?.botId||"",b?.peerId||"");if(!plan||plan.user_id!==user.id||plan.kind!=="subscription")return reply.code(404).send({error:"pending_plan_not_found"});if(!b.confirm)return reply.code(400).send({error:"explicit_confirmation_required"});const svc=await getSystemSubscriptionService(ctx.db,String(plan.payload.service_id));const params=(plan.payload.params as Record<string,unknown>)||{};if(!svc?.enabled||!(await isServiceOpenToPersona(ctx.db,svc.id,plan.persona_id))||validateSubscriptionParams(svc.params_schema,params).length)return reply.code(409).send({error:"subscription_plan_no_longer_valid"});const sub=await createUserSubscription(ctx.db,{user_id:user.id,bot_id:plan.bot_id,peer_id:plan.peer_id,persona_id:plan.persona_id,service_id:svc.id,params,enabled:1});await clearPendingScheduledPlan(ctx.db,plan.bot_id,plan.peer_id);return {ok:true,subscription:sub};});
+
+  // ── Scheduled services/tasks (super-admin only; separate datasets) ────
+  app.get("/api/v1/admin/scheduled-services", async (req, reply) => {
+    const admin = await requireSuperAdmin(req, reply, ctx); if (!admin) return;
+    const services = await listSystemSubscriptionServices(ctx.db, true);
+    const subscriptions = await listUserSubscriptions(ctx.db);
+    return { services: await Promise.all(services.map(async s => ({ ...s, personaIds: await listServicePersonaIds(ctx.db, s.id), subscriberCount: subscriptions.filter(x => x.service_id === s.id && x.enabled).length }))) };
+  });
+  app.post<{ Body: { name:string; description?:string; promptTemplate:string; paramsSchema?:Record<string,unknown>; schedule:string; timezone?:string; webSearchEnabled?:boolean; enabled?:boolean; personaIds?:string[] } }>("/api/v1/admin/scheduled-services", async (req, reply) => {
+    const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return; const b=req.body;
+    if(!b?.name||!b.promptTemplate||!b.schedule)return reply.code(400).send({error:"name, promptTemplate and schedule required"});
+    const service=await saveSystemSubscriptionService(ctx.db,{name:b.name.trim(),description:b.description?.trim()||"",prompt_template:b.promptTemplate.trim(),params_schema:b.paramsSchema||{},schedule:b.schedule.trim(),timezone:b.timezone||"Asia/Shanghai",web_search_enabled:b.webSearchEnabled?1:0,enabled:b.enabled===false?0:1});
+    await setServicePersonas(ctx.db,service.id,b.personaIds||[]); await writeAudit(ctx.db,"scheduled_service_created",admin.id,{serviceId:service.id}); return {service};
+  });
+  app.put<{ Params:{id:string}; Body: { name?:string; description?:string; promptTemplate?:string; paramsSchema?:Record<string,unknown>; schedule?:string; timezone?:string; webSearchEnabled?:boolean; enabled?:boolean; personaIds?:string[] } }>("/api/v1/admin/scheduled-services/:id", async (req,reply)=>{
+    const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return; const old=await getSystemSubscriptionService(ctx.db,req.params.id);if(!old)return reply.code(404).send({error:"not found"});const b=req.body||{};
+    const service=await saveSystemSubscriptionService(ctx.db,{...old,id:old.id,name:b.name?.trim()??old.name,description:b.description?.trim()??old.description,prompt_template:b.promptTemplate?.trim()??old.prompt_template,params_schema:b.paramsSchema??old.params_schema,schedule:b.schedule?.trim()??old.schedule,timezone:b.timezone??old.timezone,web_search_enabled:b.webSearchEnabled===undefined?old.web_search_enabled:(b.webSearchEnabled?1:0),enabled:b.enabled===undefined?old.enabled:(b.enabled?1:0)});
+    if(b.personaIds)await setServicePersonas(ctx.db,service.id,b.personaIds); await writeAudit(ctx.db,"scheduled_service_updated",admin.id,{serviceId:service.id});return {service};
+  });
+  app.delete<{ Params:{id:string} }>("/api/v1/admin/scheduled-services/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;await deleteSystemSubscriptionService(ctx.db,req.params.id);await writeAudit(ctx.db,"scheduled_service_deleted",admin.id,{serviceId:req.params.id});return {ok:true};});
+  app.get("/api/v1/admin/scheduled-tasks",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const tasks=await listScheduledTasks(ctx.db);return {tasks:tasks.map(({prompt,...safe})=>({...safe,promptSummary:prompt.slice(0,160)}))};});
+  app.post<{ Params:{id:string}; Body:{enabled?:boolean; delete?:boolean} }>("/api/v1/admin/scheduled-tasks/:id/manage",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const task=await getScheduledTask(ctx.db,req.params.id);if(!task)return reply.code(404).send({error:"not found"});if(req.body?.delete)await deleteScheduledTask(ctx.db,task.id);else await updateScheduledTask(ctx.db,task.id,{enabled:req.body?.enabled?1:0});await writeAudit(ctx.db,"scheduled_task_admin_manage",admin.id,{taskId:task.id});return {ok:true};});
+
   app.get("/api/v1/admin/personas", async (req, reply) => {
     const admin = await requireAdmin(req, reply, ctx);
     if (!admin) return;
@@ -4385,6 +4442,7 @@ export async function registerRoutes(
       tags?: string[];
       visibility?: "public" | "private";
       systemPrompt?: string;
+      serviceIds?: string[];
     };
   }>("/api/v1/admin/personas/:id", async (req, reply) => {
     const admin = await requireAdmin(req, reply, ctx);
@@ -4393,6 +4451,7 @@ export async function registerRoutes(
     if (!p) return reply.code(404).send({ error: "not found" });
     try {
       const persona = await updatePersonaMeta(ctx.db, p.id, req.body ?? {});
+      if (Array.isArray(req.body?.serviceIds)) await setPersonaServiceIds(ctx.db, p.id, req.body.serviceIds);
       await writeAudit(ctx.db, "admin_persona_updated", admin.id, {
         id: p.id,
       });
@@ -4446,6 +4505,7 @@ export async function registerRoutes(
       isDefault?: boolean;
       contentPolicy?: string;
       tags?: string[];
+      serviceIds?: string[];
     };
   }>("/api/v1/admin/personas", async (req, reply) => {
     const admin = await requireAdmin(req, reply, ctx);
@@ -4468,6 +4528,7 @@ export async function registerRoutes(
       visibility: "public",
       tags: Array.isArray(body.tags) ? body.tags : undefined,
     });
+    if (Array.isArray(body.serviceIds)) await setPersonaServiceIds(ctx.db, persona.id, body.serviceIds);
     await writeAudit(ctx.db, "persona_created", admin.id, { id: persona.id });
     return { persona };
   });

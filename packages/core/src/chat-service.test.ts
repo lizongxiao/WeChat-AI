@@ -334,4 +334,22 @@ describe("ChatService multi-user isolation (Redis)", () => {
     );
     await db.close();
   });
+
+  it("runs a scheduled task with its saved persona, not the peer's current persona", async (t) => {
+    let db;
+    try { db = openDatabase(redisUrl); await Promise.race([db.ping(), new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2500))]); }
+    catch { try { await db?.close(); } catch {} t.skip("Redis not available"); return; }
+    await seedPersonas(db);
+    const [cat, girlfriend] = await Promise.all([getPersonaBySlug(db, "catgirl"), getPersonaBySlug(db, "girlfriend")]);
+    assert.ok(cat); assert.ok(girlfriend);
+    const botId=`bot_scheduled_persona_${Date.now()}`; const peerId="scheduled_peer@im.wechat";
+    await upsertBotAccount(db,{id:botId,ownerUserId:"u_test",displayName:"test",botToken:"test-token"});
+    await approvePeer(db,botId,peerId);
+    await setAssignment(db,botId,peerId,girlfriend!.id);
+    const chat=new ChatService(db,asLlm(new FakeLlm("定时结果")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false});
+    const result=await chat.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"发送日报",webSearchEnabled:false});
+    assert.equal(result.kind,"reply");
+    assert.equal(result.personaId,cat!.id);
+    await db.close();
+  });
 });

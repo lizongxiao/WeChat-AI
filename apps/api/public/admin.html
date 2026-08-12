@@ -3697,6 +3697,7 @@
       <button type="button" data-tab="users"><i class="ico bi bi-people" aria-hidden="true"></i>用户</button>
       <button type="button" data-tab="bots"><i class="ico bi bi-robot" aria-hidden="true"></i>机器人</button>
       <button type="button" data-tab="broadcast"><i class="ico bi bi-megaphone" aria-hidden="true"></i>广播</button>
+      <button type="button" data-tab="schedules"><i class="ico bi bi-calendar2-check" aria-hidden="true"></i>定时服务</button>
       <button type="button" data-tab="personas"><i class="ico bi bi-person-vcard" aria-hidden="true"></i>人设</button>
       <button type="button" data-tab="stickers"><i class="ico bi bi-emoji-smile" aria-hidden="true"></i>表情包</button>
       <button type="button" data-tab="audit"><i class="ico bi bi-clipboard-data" aria-hidden="true"></i>审计</button>
@@ -4223,6 +4224,25 @@
         </div>
       </section>
 
+      <section id="schedules">
+        <h1 class="page-title">定时服务管理</h1>
+        <p class="page-sub">系统订阅服务与用户自建任务分开管理；仅超管可见。</p>
+        <div class="panel form-grid" style="margin-bottom:16px">
+          <h3 style="grid-column:1/-1;margin:0">新建系统订阅服务</h3>
+          <label>名称<input id="ssName" placeholder="每日天气预报" /></label>
+          <label>执行计划（Cron）<input id="ssSchedule" placeholder="0 8 * * *" /></label>
+          <label>时区<input id="ssTimezone" value="Asia/Shanghai" /></label>
+          <label class="check-label"><input id="ssWeb" type="checkbox" />允许联网搜索</label>
+          <label style="grid-column:1/-1">描述<input id="ssDescription" /></label>
+          <label style="grid-column:1/-1">Prompt 模板<textarea id="ssPrompt" placeholder="联网查询今天 {{location}} 的天气并简要推送。"></textarea></label>
+          <label style="grid-column:1/-1">参数 Schema（JSON）<textarea id="ssSchema" placeholder='{"required":["location"],"properties":{"location":{"type":"string"}}}'></textarea></label>
+          <label style="grid-column:1/-1">开放 Persona（逗号分隔 ID）<input id="ssPersonas" placeholder="persona_xxx, persona_yyy" /></label>
+          <div class="row-actions"><button class="btn btn-primary" id="ssCreate" type="button">创建服务</button><button class="btn btn-secondary" id="ssRefresh" type="button">刷新</button></div>
+        </div>
+        <div class="panel"><h3>系统订阅服务</h3><div id="ssServices" class="empty">加载中…</div></div>
+        <div class="panel" style="margin-top:16px"><h3>用户自建任务</h3><div id="ssTasks" class="empty">加载中…</div></div>
+      </section>
+
       <section id="personas">
         <h1 class="page-title">人设管理</h1>
         <p class="page-sub">广场与官方人设 · 创建 / 下架 / 恢复 / 编辑</p>
@@ -4251,6 +4271,9 @@
             </label>
             <label>标签（逗号分隔）
               <input id="pTags" placeholder="官方, 恋爱, 猫娘" />
+            </label>
+            <label>可用订阅服务（按住 Ctrl / ⌘ 多选）
+              <select id="pServiceIds" multiple size="4"></select>
             </label>
             <div>
               <div class="section-label tight">系统提示词</div>
@@ -5634,7 +5657,7 @@
       }
     }
 
-    const TAB_IDS = ["dash", "workers", "nodes", "usage", "users", "bots", "broadcast", "personas", "stickers", "audit", "stream", "system", "settings"];
+    const TAB_IDS = ["dash", "workers", "nodes", "usage", "users", "bots", "broadcast", "schedules", "personas", "stickers", "audit", "stream", "system", "settings"];
     function parseHash() {
       const raw = (location.hash || "").replace(/^#/, "");
       if (!raw) return { tab: "dash", params: {} };
@@ -6159,6 +6182,7 @@
       users: "用户",
       bots: "机器人",
       broadcast: "广播",
+      schedules: "定时服务",
       personas: "人设",
       stickers: "表情包",
       audit: "审计",
@@ -6175,6 +6199,10 @@
       if (tab === "broadcast" && !state.isSuperAdmin) {
         toast("仅系统首位管理员可使用广播", true);
         tab = "bots";
+      }
+      if (tab === "schedules" && !state.isSuperAdmin) {
+        toast("仅系统首位管理员可管理定时服务", true);
+        tab = "dash";
       }
       if (tab === "stream" && !state.isSuperAdmin) {
         toast("仅系统首位管理员可查看数据流", true);
@@ -7062,6 +7090,7 @@
         $("personaSubmit").textContent = "保存修改";
         $("personaCancelEdit").style.display = "inline-flex";
         expandPersonaForm();
+        void loadPersonaServiceOptions(p.serviceIds || []);
         $("personaFormPanel").scrollIntoView({ behavior: "smooth", block: "start" });
       });
       $("personaDetailDup")?.addEventListener("click", () => {
@@ -7753,6 +7782,11 @@
     function expandPersonaForm() {
       $("personaFormPanel").classList.remove("collapsed");
       $("personaFormToggle").setAttribute("aria-expanded", "true");
+      void loadPersonaServiceOptions();
+    }
+    async function loadPersonaServiceOptions(selectedIds = []) {
+      const sel = $("pServiceIds"); if (!sel || !state.isSuperAdmin) return;
+      try { const d = await api("/api/v1/admin/scheduled-services"); const selected = new Set(selectedIds); sel.innerHTML = (d.services || []).map((s) => `<option value="${esc(s.id)}" ${selected.has(s.id) ? "selected" : ""}>${esc(s.name)}${s.enabled ? "" : "（停用）"}</option>`).join(""); } catch (_) { sel.innerHTML = ""; }
     }
     function togglePersonaForm() {
       const p = $("personaFormPanel");
@@ -8124,7 +8158,7 @@
         state.isSuperAdmin = isSuper;
         // Node management, broadcast, live stream & runtime settings are
         // super-admin only
-        document.querySelectorAll('[data-tab="nodes"], [data-tab="broadcast"], [data-tab="stream"], [data-tab="settings"]').forEach((btn) => {
+        document.querySelectorAll('[data-tab="nodes"], [data-tab="broadcast"], [data-tab="schedules"], [data-tab="stream"], [data-tab="settings"]').forEach((btn) => {
           btn.hidden = !isSuper;
           btn.style.display = isSuper ? "" : "none";
         });
@@ -8132,6 +8166,8 @@
         if (nodesSec && !isSuper) nodesSec.hidden = true;
         const broadcastSec = document.getElementById("broadcast");
         if (broadcastSec && !isSuper) broadcastSec.hidden = true;
+        const schedulesSec = document.getElementById("schedules");
+        if (schedulesSec && !isSuper) schedulesSec.hidden = true;
         const streamSec = document.getElementById("stream");
         if (streamSec && !isSuper) streamSec.hidden = true;
         const settingsSec = document.getElementById("settings");
@@ -8365,6 +8401,23 @@
       sec?.querySelector(".err-box")?.remove();
     }
 
+    async function loadSchedules(_force) {
+      const [servicesData, tasksData] = await Promise.all([
+        api("/api/v1/admin/scheduled-services"),
+        api("/api/v1/admin/scheduled-tasks"),
+      ]);
+      const services = servicesData.services || [];
+      const tasks = tasksData.tasks || [];
+      $("ssServices").innerHTML = services.length ? services.map((s) => `<div class="detail-row" style="padding:12px 0;border-bottom:1px solid var(--separator)"><div><strong>${esc(s.name)}</strong> ${s.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge warn">停用</span>'}<div class="muted">${esc(s.schedule)} · ${esc(s.timezone)} · ${s.subscriberCount || 0} 位订阅者</div><div class="muted">Persona：${esc((s.personaIds || []).join(", ") || "未开放")}</div></div><div class="row-actions"><button class="btn btn-secondary btn-sm" data-ss-toggle="${esc(s.id)}" data-ss-enabled="${s.enabled ? "0" : "1"}">${s.enabled ? "停用" : "启用"}</button><button class="btn btn-danger btn-sm" data-ss-delete="${esc(s.id)}">删除</button></div></div>`).join("") : '<div class="empty">暂无系统订阅服务</div>';
+      $("ssTasks").innerHTML = tasks.length ? tasks.map((t) => `<div class="detail-row" style="padding:12px 0;border-bottom:1px solid var(--separator)"><div><strong>${esc(t.name)}</strong> ${t.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge warn">停用</span>'}<div class="muted">Peer：${esc(t.peer_id)} · Persona：${esc(t.persona_id)} · ${esc(t.schedule)} · 下次：${esc(t.next_run_at || "待计算")}</div><div class="muted">${esc(t.promptSummary || "")}</div></div><div class="row-actions"><button class="btn btn-secondary btn-sm" data-st-toggle="${esc(t.id)}" data-st-enabled="${t.enabled ? "0" : "1"}">${t.enabled ? "停用" : "启用"}</button><button class="btn btn-danger btn-sm" data-st-delete="${esc(t.id)}">删除</button></div></div>`).join("") : '<div class="empty">暂无用户自建任务</div>';
+      document.querySelectorAll("[data-ss-toggle]").forEach((b) => b.onclick = async () => { await api("/api/v1/admin/scheduled-services/" + encodeURIComponent(b.dataset.ssToggle), {method:"PUT", body:{enabled:b.dataset.ssEnabled === "1"}}); await loadSchedules(true); });
+      document.querySelectorAll("[data-ss-delete]").forEach((b) => b.onclick = async () => { if (!await confirmDialog("删除服务", "会阻止后续执行，确认删除？")) return; await api("/api/v1/admin/scheduled-services/" + encodeURIComponent(b.dataset.ssDelete), {method:"DELETE"}); await loadSchedules(true); });
+      document.querySelectorAll("[data-st-toggle]").forEach((b) => b.onclick = async () => { await api("/api/v1/admin/scheduled-tasks/" + encodeURIComponent(b.dataset.stToggle) + "/manage", {method:"POST", body:{enabled:b.dataset.stEnabled === "1"}}); await loadSchedules(true); });
+      document.querySelectorAll("[data-st-delete]").forEach((b) => b.onclick = async () => { if (!await confirmDialog("删除任务", "确认删除此用户任务？")) return; await api("/api/v1/admin/scheduled-tasks/" + encodeURIComponent(b.dataset.stDelete) + "/manage", {method:"POST", body:{delete:true}}); await loadSchedules(true); });
+      $("ssRefresh").onclick = () => loadSchedules(true).catch((e) => toast(e.message, true));
+      $("ssCreate").onclick = async () => { try { const schemaText=$("ssSchema").value.trim(); const personaIds=$("ssPersonas").value.split(/[,，]/).map(x=>x.trim()).filter(Boolean); await api("/api/v1/admin/scheduled-services", {method:"POST",body:{name:$("ssName").value.trim(),description:$("ssDescription").value.trim(),promptTemplate:$("ssPrompt").value.trim(),paramsSchema:schemaText?JSON.parse(schemaText):{},schedule:$("ssSchedule").value.trim(),timezone:$("ssTimezone").value.trim()||"Asia/Shanghai",webSearchEnabled:$("ssWeb").checked,personaIds}}); toast("服务已创建"); await loadSchedules(true); } catch(e) { toast(e.message || "创建失败", true); } };
+    }
+
     async function loadTab(tab) {
       try {
         clearTabError(tab);
@@ -8376,6 +8429,7 @@
         if (tab === "users") return await loadUsers(state.loaded.users ? "refresh" : true);
         if (tab === "bots") return await loadBots(state.loaded.bots ? "refresh" : true);
         if (tab === "broadcast") return await loadBroadcast(true);
+        if (tab === "schedules") return await loadSchedules(true);
         if (tab === "personas") return await loadPersonas(state.loaded.personas ? "refresh" : true);
         if (tab === "stickers") return await loadStickers(state.loaded.stickers ? "refresh" : true);
         if (tab === "audit") return await loadAudit(true);
@@ -11850,6 +11904,7 @@
       $("pDesc").value = "";
       if ($("pTags")) $("pTags").value = "";
       $("pPrompt").value = "";
+      if ($("pServiceIds")) $("pServiceIds").innerHTML = "";
       if ($("pDefault")) $("pDefault").checked = false;
       $("personaFormTitle").textContent = "创建 / 编辑官方人设";
       $("personaSubmit").textContent = "发布官方人设";
@@ -11889,6 +11944,7 @@
           .split(/[,，]/)
           .map((t) => t.trim())
           .filter(Boolean);
+        const serviceIds = Array.from($("pServiceIds")?.selectedOptions || []).map((o) => o.value);
         if (editId) {
           await api("/api/v1/admin/personas/" + editId, {
             method: "PUT",
@@ -11897,6 +11953,7 @@
               description: $("pDesc").value.trim(),
               systemPrompt,
               tags,
+              serviceIds,
             },
           });
           if ($("pDefault")?.checked) {
@@ -11917,6 +11974,7 @@
               systemPrompt,
               isDefault: Boolean($("pDefault")?.checked),
               tags,
+              serviceIds,
             },
           });
           toast("官方人设已创建");

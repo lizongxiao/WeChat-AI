@@ -65,6 +65,23 @@ export const K = {
   proactiveDayCount: (botId: string, peerId: string, day: string) =>
     `wa:proactive:day:${botId}:${peerId}:${day}`,
 
+  // ── Scheduled services (kept separate from proactive) ─────────────
+  scheduledService: (id: string) => `wa:schedule:service:${id}`,
+  scheduledServices: "wa:schedule:services",
+  scheduledServicePersonas: (id: string) => `wa:schedule:service:${id}:personas`,
+  scheduledSubscription: (id: string) => `wa:schedule:subscription:${id}`,
+  scheduledSubscriptions: "wa:schedule:subscriptions",
+  scheduledSubscriptionsByUser: (userId: string) => `wa:schedule:subscriptions:user:${userId}`,
+  scheduledSubscriptionsByPeer: (botId: string, peerId: string) => `wa:schedule:subscriptions:peer:${botId}:${peerId}`,
+  scheduledTask: (id: string) => `wa:schedule:task:${id}`,
+  scheduledTasks: "wa:schedule:tasks",
+  scheduledTasksByUser: (userId: string) => `wa:schedule:tasks:user:${userId}`,
+  scheduledTasksByPeer: (botId: string, peerId: string) => `wa:schedule:tasks:peer:${botId}:${peerId}`,
+  /** Chat-originated plans only; TTL protects against stale confirmation. */
+  scheduledPending: (botId: string, peerId: string) => `wa:schedule:pending:${botId}:${peerId}`,
+  /** NX execution gate: source id + scheduled UTC minute. */
+  scheduledExecutionLock: (source: string, id: string, minute: string) => `wa:schedule:lock:${source}:${id}:${minute}`,
+
   audit: "wa:audit",
   usageDay: (day: string) => `wa:usage:day:${day}`,
   usageDayUser: (day: string, userId: string) =>

@@ -84,6 +84,8 @@ import {
   BroadcastRunner,
   type AdminSendResult,
 } from "./broadcast-runner.js";
+import { ScheduledScheduler } from "./scheduled-scheduler.js";
+import { handleScheduledChatTool } from "./scheduled-chat-tools.js";
 import { emitActivity, previewText } from "./activity-stream.js";
 
 /**
@@ -307,6 +309,8 @@ export class BotWorkerManager {
   private startError: string | null = null;
   private proactive: ProactiveScheduler | null = null;
   private broadcast: BroadcastRunner | null = null;
+  /** Confirmed subscription/task executions; independent from proactive scans. */
+  private scheduled: ScheduledScheduler | null = null;
   /** Dedicated Redis connection for SUBSCRIBE (cannot share with command client). */
   private wakeSub: ReturnType<Db["redis"]["duplicate"]> | null = null;
   private wakeDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -665,6 +669,7 @@ export class BotWorkerManager {
 
     this.startProactiveScheduler();
     this.startBroadcastRunner();
+    this.startScheduledScheduler();
     this.startWakeSubscriber();
 
     this.opts.log?.(
@@ -881,6 +886,19 @@ export class BotWorkerManager {
     this.broadcast.start();
   }
 
+  private startScheduledScheduler(): void {
+    this.scheduled?.stop();
+    this.scheduled = new ScheduledScheduler({
+      db: this.opts.db,
+      chat: this.opts.chat,
+      intervalSec: 30,
+      lockTtlSec: 120,
+      log: this.opts.log,
+      sendText: (botId, peerId, text) => this.adminSendText(botId, peerId, text),
+    });
+    this.scheduled.start();
+  }
+
   /** Wake broadcast runner after admin creates a job. */
   wakeBroadcast(): void {
     this.broadcast?.wake();
@@ -974,6 +992,8 @@ export class BotWorkerManager {
     this.runtimeActive = false;
     this.proactive?.stop();
     this.proactive = null;
+    this.scheduled?.stop();
+    this.scheduled = null;
     this.broadcast?.stop();
     this.broadcast = null;
     this.stopWakeSubscriber();
@@ -2232,6 +2252,24 @@ export class BotWorkerManager {
       } catch {
         this.jobsFailed++;
       }
+      return;
+    }
+
+    // Scheduling requests are handled by a deterministic capability before the
+    // general LLM turn. This is the confirmation/security boundary: text the
+    // model generates cannot itself create, modify, or delete Redis records.
+    const scheduledReply = await handleScheduledChatTool(this.opts.db, {
+      botId: job.botId,
+      peerId: job.peerId,
+      text: job.text,
+    });
+    if (scheduledReply) {
+      await client.sendText({
+        toUserId: job.peerId,
+        text: scheduledReply,
+        contextToken: job.contextToken,
+      });
+      this.jobsProcessed++;
       return;
     }
 

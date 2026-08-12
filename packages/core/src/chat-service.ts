@@ -4,6 +4,7 @@ import {
   clearMemories,
   ensurePeer,
   getBotAccount,
+  getPersona,
   getPublishedGraph,
   getPublishedPrompt,
   getUser,
@@ -131,6 +132,16 @@ export interface ProactiveChatRequest {
   contextToken: string;
   /** Approximate idle hours for prompt (from scheduler) */
   idleHours: number;
+}
+/** A scheduler-only turn. The caller supplies the persisted task instruction;
+ * this API deliberately never writes schedules or parses confirmations. */
+export interface ScheduledChatRequest {
+  botAccountId: string;
+  peerId: string;
+  contextToken: string;
+  personaId: string;
+  prompt: string;
+  webSearchEnabled: boolean;
 }
 
 export interface InboundChatResult {
@@ -904,6 +915,33 @@ export class ChatService {
       personaId: persona.id,
       personaSlug: persona.slug,
     };
+  }
+
+  /** Execute a confirmed scheduled instruction using the latest persona prompt. */
+  async handleScheduled(req: ScheduledChatRequest): Promise<InboundChatResult> {
+    const persona = await getPersona(this.db, req.personaId);
+    if (!persona?.enabled) return { kind: "skip", skipReason: "persona_unavailable" };
+    // Scheduler tasks intentionally use the prompt-mode tool chain. A chatflow
+    // cannot safely accept an arbitrary persisted instruction as a graph input.
+    if (persona.mode === "chatflow") return { kind: "skip", skipReason: "chatflow_unsupported" };
+    const [systemPrompt, bot, history, memories] = await Promise.all([
+      getPublishedPrompt(this.db, persona.id), getBotAccount(this.db, req.botAccountId),
+      listRecentMessages(this.db, req.botAccountId, req.peerId, this.opts.shortHistoryLimit, persona.id),
+      listMemories(this.db, req.botAccountId, req.peerId, persona.id),
+    ]);
+    if (!systemPrompt) return { kind: "skip", skipReason: "persona_prompt_missing" };
+    const botName = bot?.display_name?.trim() || "助手";
+    const stickers = this.opts.stickersEnabled === false || !bot?.owner_user_id ? [] : await listStickersForOwnerPrompt(this.db, bot.owner_user_id);
+    const selectedMemories = selectMemoriesForPrompt(memories, req.prompt, { topK: this.opts.memoryTopK, fullInjectMax: this.opts.memoryFullInjectMax });
+    const messages = buildChatMessages({ systemPrompt, memories: selectedMemories, history, userText: `这是已确认的定时任务，请立即执行并直接给用户推送结果：\n${req.prompt}`, botName, multiBubbleJson: this.primaryMultiBubbleJson(), stickers, timeToolEnabled: this.opts.timeToolEnabled !== false });
+    const { client, callOpts } = await this.resolveChatClient({ persona: { ...persona, web_search_enabled: req.webSearchEnabled && persona.web_search_enabled ? 1 : 0 }, ownerUserId: bot?.owner_user_id });
+    const usage = await client.chatWithUsage(messages, callOpts);
+    const owner = bot?.owner_user_id ? await getUser(this.db, bot.owner_user_id) : undefined;
+    await recordTokenUsage(this.db, { userId: bot?.owner_user_id, botId: req.botAccountId, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, username: owner?.username, botName: bot?.display_name });
+    const finalized = await this.finalizeReplyParts({ rawLlmText: usage.text, stickers, botAccountId: req.botAccountId, ownerUserId: bot?.owner_user_id, ownerUsername: owner?.username, botName: bot?.display_name });
+    if (!finalized.displayText.trim()) return { kind: "skip", skipReason: "empty_reply" };
+    await insertMessage(this.db, { botAccountId:req.botAccountId, peerId:req.peerId, personaId:persona.id, role:"assistant", content:finalized.displayText, contextToken:req.contextToken });
+    return { kind:"reply", text:finalized.displayText, bubbles:finalized.bubbles, parts:finalized.parts, bubblesFromJson:finalized.bubblesFromJson, personaId:persona.id, personaSlug:persona.slug, ownerUserId:bot?.owner_user_id };
   }
 
   async extractMemory(

@@ -33,6 +33,8 @@ import {
   ensureStickerContentHash,
   getAppSession,
   getAssignmentsMany,
+  getAssignmentPersonaId,
+  getBindByPeer,
   getBindByUser,
   getBotAccount,
   getBotAccountsByIds,
@@ -171,6 +173,7 @@ import {
   createUserSubscription,
   deleteUserSubscription,
   listUserSubscriptions,
+  listPeerSubscriptions,
   updateUserSubscription,
   getSystemSubscriptionService,
   listSystemSubscriptionServices,
@@ -1606,6 +1609,55 @@ export async function registerRoutes(
     return { ok: true };
   });
 
+  // The owner/admin may subscribe a Peer from the user-management screen.  The
+  // current assignment is resolved on the server: the browser never chooses a
+  // Persona ID, and the created subscription keeps that ID permanently.
+  app.get("/api/v1/me/peer-subscription-services", async (req, reply) => {
+    const user = await requireUser(req, reply, ctx);
+    if (!user) return;
+    const { botId, peerId } = req.query as { botId?: string; peerId?: string };
+    if (!botId || !peerId) return reply.code(400).send({ error: "botId and peerId required" });
+    const bot = await getBotAccount(ctx.db, botId);
+    if (!bot || (bot.owner_user_id !== user.id && !user.is_admin)) return reply.code(403).send({ error: "forbidden" });
+    const peer = (await listPeers(ctx.db, botId)).find((item) => item.peer_id === peerId);
+    if (!peer?.approved) return reply.code(409).send({ error: "peer_not_approved" });
+    const personaId = await getAssignmentPersonaId(ctx.db, botId, peerId);
+    const persona = personaId ? await getPersona(ctx.db, personaId) : null;
+    if (!persona || !persona.enabled) return reply.code(409).send({ error: "peer_persona_unavailable" });
+    const all = await listSystemSubscriptionServices(ctx.db);
+    const services = [] as Array<{ id:string; name:string; description:string; paramsSchema:Record<string,unknown>; schedule:string; timezone:string }>;
+    for (const service of all) {
+      if (await isServiceOpenToPersona(ctx.db, service.id, persona.id)) {
+        services.push({ id: service.id, name: service.name, description: service.description, paramsSchema: service.params_schema, schedule: service.schedule, timezone: service.timezone });
+      }
+    }
+    return { peer: { botId, peerId, personaId: persona.id, personaName: persona.display_name }, services };
+  });
+
+  app.post<{ Body: { botId:string; peerId:string; serviceId:string; params?:Record<string,unknown> } }>("/api/v1/me/peer-subscriptions", async (req, reply) => {
+    const user = await requireUser(req, reply, ctx);
+    if (!user) return;
+    const body = req.body;
+    if (!body?.botId || !body.peerId || !body.serviceId) return reply.code(400).send({ error: "botId, peerId and serviceId required" });
+    const bot = await getBotAccount(ctx.db, body.botId);
+    if (!bot || (bot.owner_user_id !== user.id && !user.is_admin)) return reply.code(403).send({ error: "forbidden" });
+    const peer = (await listPeers(ctx.db, body.botId)).find((item) => item.peer_id === body.peerId);
+    if (!peer?.approved) return reply.code(409).send({ error: "peer_not_approved" });
+    const personaId = await getAssignmentPersonaId(ctx.db, body.botId, body.peerId);
+    const [persona, service] = await Promise.all([personaId ? getPersona(ctx.db, personaId) : null, getSystemSubscriptionService(ctx.db, body.serviceId)]);
+    if (!persona?.enabled) return reply.code(409).send({ error: "peer_persona_unavailable" });
+    if (!service?.enabled || !(await isServiceOpenToPersona(ctx.db, service.id, persona.id))) return reply.code(403).send({ error: "service_not_available_for_persona" });
+    const params = body.params || {};
+    const errors = validateSubscriptionParams(service.params_schema, params);
+    if (errors.length) return reply.code(400).send({ error: "invalid_service_params", details: errors });
+    const existing = await listPeerSubscriptions(ctx.db, body.botId, body.peerId);
+    if (existing.some((item) => item.service_id === service.id && item.persona_id === persona.id && item.enabled)) return reply.code(409).send({ error: "subscription_already_exists" });
+    const bind = await getBindByPeer(ctx.db, body.botId, body.peerId);
+    const subscription = await createUserSubscription(ctx.db, { user_id: bind?.userId || `wechat:${body.botId}:${body.peerId}`, bot_id: body.botId, peer_id: body.peerId, persona_id: persona.id, service_id: service.id, params, enabled: 1 });
+    await writeAudit(ctx.db, "peer_subscription_created", user.id, { botId: body.botId, peerId: body.peerId, personaId: persona.id, serviceId: service.id, subscriptionId: subscription.id });
+    return { ok: true, subscription };
+  });
+
   /** @deprecated use /me/personas — kept for compatibility, returns library */
   app.get("/api/v1/personas", async (req, reply) => {
     const user = await requireUser(req, reply, ctx);
@@ -1687,6 +1739,14 @@ export async function registerRoutes(
       };
     },
   );
+
+  /** Service catalog for the Persona editor. A service can be opened by the
+   * Persona owner, but creation/editing of the service itself remains super-admin. */
+  app.get("/api/v1/me/published-scheduled-services", async (req, reply) => {
+    const user = await requireUser(req, reply, ctx); if (!user) return;
+    const services = await listSystemSubscriptionServices(ctx.db);
+    return { services: services.map(({ prompt_template, ...safe }) => safe) };
+  });
 
   /** GET chatflow graph (owner or public read for try/editor load). */
   app.get<{ Params: { id: string } }>(
@@ -1805,6 +1865,7 @@ export async function registerRoutes(
       mode?: "prompt" | "chatflow";
       llmProviderId?: string | null;
       webSearchEnabled?: boolean;
+      serviceIds?: string[];
     };
   }>("/api/v1/square/personas", async (req, reply) => {
     const user = await requireUser(req, reply, ctx);
@@ -1822,6 +1883,10 @@ export async function registerRoutes(
           return reply.code(400).send({ error: "invalid llmProviderId" });
         }
       }
+      if (Array.isArray(body.serviceIds)) {
+        const allowed = new Set((await listSystemSubscriptionServices(ctx.db)).map((s) => s.id));
+        if (body.serviceIds.some((id) => !allowed.has(id))) return reply.code(400).send({ error: "invalid_service_id" });
+      }
       const persona = await createPersona(ctx.db, {
         displayName: body.displayName,
         description: body.description,
@@ -1833,6 +1898,7 @@ export async function registerRoutes(
         llmProviderId: body.llmProviderId ?? null,
         webSearchEnabled: Boolean(body.webSearchEnabled),
       });
+      if (Array.isArray(body.serviceIds)) await setPersonaServiceIds(ctx.db, persona.id, body.serviceIds);
       await writeAudit(ctx.db, "persona_published_square", user.id, {
         id: persona.id,
         visibility: persona.visibility,
@@ -1855,6 +1921,7 @@ export async function registerRoutes(
       mode?: "prompt" | "chatflow";
       llmProviderId?: string | null;
       webSearchEnabled?: boolean;
+      serviceIds?: string[];
     };
   }>("/api/v1/square/personas/:id", async (req, reply) => {
     const user = await requireUser(req, reply, ctx);
@@ -1882,6 +1949,12 @@ export async function registerRoutes(
         llmProviderId: body.llmProviderId,
         webSearchEnabled: body.webSearchEnabled,
       });
+      if (Array.isArray(body.serviceIds)) {
+        const catalog = await listSystemSubscriptionServices(ctx.db);
+        const allowed = new Set(catalog.map((s) => s.id));
+        if (body.serviceIds.some((id) => !allowed.has(id))) return reply.code(400).send({ error: "invalid_service_id" });
+        await setPersonaServiceIds(ctx.db, p.id, body.serviceIds);
+      }
       return { persona: personaPublicDto(persona) };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -4360,6 +4433,7 @@ export async function registerRoutes(
     if(b.personaIds)await setServicePersonas(ctx.db,service.id,b.personaIds); await writeAudit(ctx.db,"scheduled_service_updated",admin.id,{serviceId:service.id});return {service};
   });
   app.delete<{ Params:{id:string} }>("/api/v1/admin/scheduled-services/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;await deleteSystemSubscriptionService(ctx.db,req.params.id);await writeAudit(ctx.db,"scheduled_service_deleted",admin.id,{serviceId:req.params.id});return {ok:true};});
+  app.post<{ Params:{id:string}; Body:{personaId?:string} }>("/api/v1/admin/scheduled-services/:id/test",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const service=await getSystemSubscriptionService(ctx.db,req.params.id);if(!service?.enabled)return reply.code(409).send({error:"service_unavailable"});const personaId=req.body?.personaId;if(personaId&&!(await isServiceOpenToPersona(ctx.db,service.id,personaId)))return reply.code(400).send({error:"persona_not_open_for_service"});try{const result=await ctx.worker.testScheduledService(service.id,personaId);await writeAudit(ctx.db,"scheduled_service_test",admin.id,{serviceId:service.id,personaId:personaId||null,...result});return {ok:true,...result};}catch(err){return reply.code(500).send({error:err instanceof Error?err.message:String(err)});}});
   app.get("/api/v1/admin/scheduled-tasks",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const tasks=await listScheduledTasks(ctx.db);return {tasks:tasks.map(({prompt,...safe})=>({...safe,promptSummary:prompt.slice(0,160)}))};});
   app.get<{ Params:{id:string} }>("/api/v1/admin/scheduled-tasks/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const task=await getScheduledTask(ctx.db,req.params.id);if(!task)return reply.code(404).send({error:"not found"});return {task};});
   app.put<{ Params:{id:string}; Body:{name?:string;prompt?:string;schedule?:string;timezone?:string;webSearchEnabled?:boolean;enabled?:boolean} }>("/api/v1/admin/scheduled-tasks/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const old=await getScheduledTask(ctx.db,req.params.id);if(!old)return reply.code(404).send({error:"not found"});const b=req.body||{};const task=await updateScheduledTask(ctx.db,old.id,{name:b.name?.trim()||old.name,prompt:b.prompt?.trim()||old.prompt,schedule:b.schedule?.trim()||old.schedule,timezone:b.timezone?.trim()||old.timezone,web_search_enabled:b.webSearchEnabled===undefined?old.web_search_enabled:(b.webSearchEnabled?1:0),enabled:b.enabled===undefined?old.enabled:(b.enabled?1:0),next_run_at:null});await writeAudit(ctx.db,"scheduled_task_admin_updated",admin.id,{taskId:task.id});return {task};});

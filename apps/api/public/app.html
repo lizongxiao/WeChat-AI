@@ -1033,6 +1033,21 @@
       border-color: var(--focus-border);
       box-shadow: 0 0 0 4px var(--ring);
     }
+    .form-field select[multiple] {
+      min-height: 132px;
+      padding: 7px;
+      background: var(--surface);
+    }
+    .form-field select[multiple] option {
+      padding: 9px 10px;
+      border-radius: 8px;
+    }
+    .field-hint {
+      font-size: 12px;
+      font-weight: 400;
+      color: var(--text-tertiary);
+      line-height: 1.45;
+    }
     .check-row {
       display: flex;
       align-items: center;
@@ -3068,6 +3083,10 @@
                 <option value="">平台默认（管理员 LLM）</option>
               </select>
             </label>
+            <label class="form-field" style="grid-column:1/-1">可订阅定时服务
+              <select id="pubServiceIds" multiple size="4" title="选择此人设向用户开放的系统订阅服务"></select>
+              <span class="field-hint">按住 Ctrl / ⌘ 可多选；只显示已发布且启用的服务。</span>
+            </label>
           </div>
           <label class="check-row">
             <input type="checkbox" id="pubWebSearch" />
@@ -4516,6 +4535,7 @@
             : `<button class="btn btn-primary btn-sm" type="button" data-ap="${esc(key)}">批准</button>`
         }
         <button class="btn btn-secondary btn-sm" type="button" data-as="${esc(key)}">分配人设</button>
+        <button class="btn btn-secondary btn-sm" type="button" data-sub="${esc(key)}" ${p.approved ? "" : "disabled title=\"请先批准用户\""}>订阅服务</button>
         <button class="btn btn-ghost btn-sm" type="button" data-mem="${esc(key)}">记忆</button>
       </div>`;
     }
@@ -4556,6 +4576,82 @@
           } catch (e) {
             toast(e.message || "分配失败", true);
           }
+        };
+      });
+      document.querySelectorAll("[data-sub]").forEach((btn) => {
+        btn.onclick = async () => {
+          const [botId, peerId] = btn.dataset.sub.split("|");
+          try {
+            const data = await api(
+              "/api/v1/me/peer-subscription-services?botId=" + encodeURIComponent(botId) + "&peerId=" + encodeURIComponent(peerId),
+            );
+            if (!(data.services || []).length) {
+              toast("该用户当前人设没有开放可订阅服务");
+              return;
+            }
+            let host = document.getElementById("peerSubscriptionSheet");
+            if (!host) {
+              host = document.createElement("div");
+              host.id = "peerSubscriptionSheet";
+              host.setAttribute("role", "dialog");
+              host.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.35);padding:16px";
+              document.body.appendChild(host);
+            }
+            host.innerHTML = "";
+            const card = document.createElement("div");
+            card.style.cssText = "background:var(--surface,#fff);color:var(--text,#111);border:1px solid var(--border,rgba(0,0,0,.08));border-radius:16px;max-width:520px;width:100%;padding:18px 16px 16px;box-shadow:0 12px 40px rgba(0,0,0,.18)";
+            card.innerHTML = `
+              <h3 style="margin:0 0 8px;font-size:17px">为微信用户订阅</h3>
+              <p class="muted" style="margin:0 0 14px;font-size:13px;word-break:break-all">${esc(peerId)} · 当前人设：${esc(data.peer.personaName)}</p>
+              <label class="field-label" for="peerSubService">订阅服务</label>
+              <select id="peerSubService" class="input" style="width:100%;margin:6px 0 12px">${data.services.map((service) => `<option value="${esc(service.id)}">${esc(service.name)} · ${esc(service.schedule)}</option>`).join("")}</select>
+              <p id="peerSubDesc" class="muted" style="margin:0 0 12px;font-size:13px"></p>
+              <div id="peerSubParams"></div>
+              <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn btn-secondary" id="peerSubCancel">取消</button><button type="button" class="btn btn-primary" id="peerSubSave">确认订阅</button></div>`;
+            host.appendChild(card);
+            host.style.display = "flex";
+            const close = () => { host.style.display = "none"; host.innerHTML = ""; };
+            const serviceSelect = card.querySelector("#peerSubService");
+            const renderFields = () => {
+              const service = data.services.find((item) => item.id === serviceSelect.value);
+              card.querySelector("#peerSubDesc").textContent = (service.description || "") + (service.timezone ? ` · ${service.timezone}` : "");
+              const schema = service.paramsSchema || {};
+              const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+              const required = Array.isArray(schema.required) ? schema.required : [];
+              const fields = Object.entries(properties).map(([name, rule]) => {
+                const item = rule && typeof rule === "object" ? rule : {};
+                const label = item.title || name;
+                const suffix = required.includes(name) ? " <span style=\"color:var(--danger,#d33)\">*</span>" : "";
+                const choices = Array.isArray(item.enum) ? `<select class="input" data-peer-sub-param="${esc(name)}" style="width:100%;margin-top:5px">${item.enum.map((value) => `<option value="${esc(String(value))}">${esc(String(value))}</option>`).join("")}</select>` : `<input class="input" data-peer-sub-param="${esc(name)}" type="${item.type === "number" ? "number" : "text"}" style="width:100%;margin-top:5px" placeholder="${esc(item.description || "请输入" + label)}" />`;
+                return `<label class="field-label" style="display:block;margin:10px 0 0">${esc(label)}${suffix}${choices}</label>`;
+              }).join("");
+              card.querySelector("#peerSubParams").innerHTML = fields || '<p class="muted" style="margin:0">该服务无需填写参数。</p>';
+            };
+            renderFields();
+            serviceSelect.onchange = renderFields;
+            card.querySelector("#peerSubCancel").onclick = close;
+            host.onclick = (event) => { if (event.target === host) close(); };
+            card.querySelector("#peerSubSave").onclick = async () => {
+              const service = data.services.find((item) => item.id === serviceSelect.value);
+              const params = {};
+              let valid = true;
+              card.querySelectorAll("[data-peer-sub-param]").forEach((input) => {
+                const rule = (service.paramsSchema?.properties || {})[input.dataset.peerSubParam] || {};
+                const value = input.value;
+                if (rule.type === "number") params[input.dataset.peerSubParam] = Number(value);
+                else params[input.dataset.peerSubParam] = value;
+                if ((service.paramsSchema?.required || []).includes(input.dataset.peerSubParam) && !value) valid = false;
+              });
+              if (!valid) { toast("请填写必填订阅参数", true); return; }
+              const ok = await confirmDialog({ title: "确认订阅", message: `将为该微信用户订阅「${service.name}」，并绑定当前人设「${data.peer.personaName}」。`, okText: "确认订阅", danger: false });
+              if (!ok) return;
+              try {
+                await api("/api/v1/me/peer-subscriptions", { method: "POST", body: { botId, peerId, serviceId: service.id, params } });
+                toast("订阅已创建");
+                close();
+              } catch (e) { toast(e.message || "订阅失败", true); }
+            };
+          } catch (e) { toast(e.message || "无法获取可订阅服务", true); }
         };
       });
       document.querySelectorAll("[data-mem]").forEach((btn) => {
@@ -5640,12 +5736,28 @@
       if ($("pubMode")) $("pubMode").value = "prompt";
       if ($("pubWebSearch")) $("pubWebSearch").checked = false;
       if ($("pubLlmProvider")) $("pubLlmProvider").value = "";
+      if ($("pubServiceIds")) $("pubServiceIds").innerHTML = "";
       const pubRadio = document.querySelector('input[name="pubVis"][value="public"]');
       if (pubRadio) pubRadio.checked = true;
       $("editorTitle").textContent = "人设编辑器";
       $("pubSubmit").textContent = "发布人设";
       $("pubCancelEdit").style.display = "none";
       syncChatflowHint();
+      void loadPublishedScheduledServices();
+    }
+
+    async function loadPublishedScheduledServices(selectedIds = []) {
+      const select = $("pubServiceIds");
+      if (!select) return;
+      try {
+        const data = await api("/api/v1/me/published-scheduled-services");
+        const selected = new Set(selectedIds);
+        select.innerHTML = (data.services || []).map((s) =>
+          `<option value="${esc(s.id)}" ${selected.has(s.id) ? "selected" : ""}>${esc(s.name)} · ${esc(s.schedule)} (${esc(s.timezone)})</option>`,
+        ).join("") || '<option disabled>暂无已发布的定时服务</option>';
+      } catch (e) {
+        select.innerHTML = '<option disabled>定时服务加载失败</option>';
+      }
     }
 
     async function startEditPersona(id) {
@@ -5667,6 +5779,7 @@
         if ($("pubWebSearch")) {
           $("pubWebSearch").checked = Boolean(p.webSearchEnabled);
         }
+        await loadPublishedScheduledServices(p.serviceIds || []);
         await fillPubLlmSelect(p.llmProviderId || "");
         $("editorTitle").textContent = "编辑人设";
         $("pubSubmit").textContent = "保存修改";
@@ -5830,6 +5943,7 @@
       const mode = $("pubMode")?.value === "chatflow" ? "chatflow" : "prompt";
       const llmProviderId = ($("pubLlmProvider")?.value || "").trim() || null;
       const webSearchEnabled = Boolean($("pubWebSearch")?.checked);
+      const serviceIds = Array.from($("pubServiceIds")?.selectedOptions || []).map((o) => o.value);
       const body = {
         displayName,
         description: $("pubDesc").value.trim(),
@@ -5839,6 +5953,7 @@
         mode,
         llmProviderId,
         webSearchEnabled,
+        serviceIds,
       };
       try {
         if (state.editingPersonaId) {

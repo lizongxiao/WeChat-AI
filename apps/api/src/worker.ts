@@ -899,6 +899,13 @@ export class BotWorkerManager {
     this.scheduled.start();
   }
 
+  /** Admin-only route uses this to smoke-test a service against real, opted-in
+   * subscribers. It intentionally does not select every peer of a Persona. */
+  async testScheduledService(serviceId: string, personaId?: string) {
+    if (!this.scheduled) throw new Error("scheduled_scheduler_unavailable");
+    return this.scheduled.testService(serviceId, personaId);
+  }
+
   /** Wake broadcast runner after admin creates a job. */
   wakeBroadcast(): void {
     this.broadcast?.wake();

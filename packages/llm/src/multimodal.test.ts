@@ -103,6 +103,31 @@ function installSearchingModelFetch(): Captured[] {
   );
 }
 
+/** A model that keeps requesting searches while tools remain available. */
+function installPersistentSearchingModelFetch(): Captured[] {
+  let callId = 0;
+  return installFetch((call) => {
+    if (!Array.isArray(call.body.tools)) return json(ANSWER);
+    callId++;
+    return json(
+      completion({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: `call_${callId}`,
+            type: "function",
+            function: {
+              name: "web_search",
+              arguments: JSON.stringify({ query: `上海 天气 ${callId}` }),
+            },
+          },
+        ],
+      }),
+    );
+  });
+}
+
 let capturingFetch: typeof fetch | null = null;
 
 const IMAGE_MESSAGE: ChatMessage = {
@@ -187,6 +212,23 @@ describe("multimodal messages (platform path)", () => {
       },
     );
 
+    assert.deepEqual(res.toolsUsed, ["web_search"]);
+  });
+
+  it("forces a final text answer after the tool-call limit", async () => {
+    const captured = installPersistentSearchingModelFetch();
+    const res = await platform().chatWithUsage(
+      [{ role: "user", content: "查询今天上海天气" }],
+      {
+        tools: ["web_search"],
+        maxToolRounds: 1,
+        webSearch: async () => "上海 今天 多云 28~34℃",
+      },
+    );
+
+    assert.equal(res.text, "看到了");
+    assert.equal(captured.length, 3);
+    assert.equal(captured[2]?.body.tools, undefined);
     assert.deepEqual(res.toolsUsed, ["web_search"]);
   });
 

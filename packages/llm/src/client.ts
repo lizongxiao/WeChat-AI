@@ -427,7 +427,7 @@ export class LlmClient {
       }
 
       const toolCalls = choice.tool_calls;
-      if (toolsOpt && toolCalls?.length && round < maxRounds) {
+      if (toolsOpt && toolCalls?.length) {
         apiMessages.push({
           role: "assistant",
           content: choice.content ?? null,
@@ -454,7 +454,36 @@ export class LlmClient {
             content: result,
           });
         }
-        continue;
+        if (round < maxRounds) continue;
+
+        // Some reasoning models keep asking for another search instead of
+        // synthesizing text. After honoring the final allowed call, remove the
+        // tools and make one explicit answer-only request so a null tool-call
+        // message is never mistaken for an empty reply.
+        const finalRes = await this.createCompletion(
+          apiMessages,
+          undefined,
+          upstream,
+          modelOverride,
+          maxTokensOverride,
+          false,
+        );
+        promptTokens += finalRes.usage?.prompt_tokens ?? 0;
+        completionTokens += finalRes.usage?.completion_tokens ?? 0;
+        model = finalRes.model || modelOverride || this.model;
+        const finalChoice = finalRes.choices[0]?.message;
+        const finalText = (finalChoice?.content ?? "").trim();
+        if (!finalText) {
+          throw new Error("LLM returned empty content after tool results");
+        }
+        return {
+          text: finalText,
+          promptTokens,
+          completionTokens,
+          totalTokens: promptTokens + completionTokens,
+          model,
+          toolsUsed,
+        };
       }
 
       const text = (choice.content ?? "").trim();

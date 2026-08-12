@@ -109,6 +109,7 @@ import {
   takeOauthState,
   setBotStatus,
   setPeerProactiveEnabled,
+  setPeerRemark,
   unblockUser,
   updateBotDisplayName,
   updateBotProactiveSettings,
@@ -1460,6 +1461,25 @@ export async function registerRoutes(
     }
   });
 
+  app.patch<{
+    Body: { botAccountId: string; peerId: string; remark: string };
+  }>("/api/v1/me/peers/remark", async (req, reply) => {
+    const user = await requireUser(req, reply, ctx);
+    if (!user) return;
+    const { botAccountId, peerId, remark } = req.body ?? {};
+    if (!botAccountId || !peerId || typeof remark !== "string") {
+      return reply.code(400).send({ error: "botAccountId, peerId and remark required" });
+    }
+    if (remark.trim().length > 80) return reply.code(400).send({ error: "remark_too_long" });
+    const bot = await getBotAccount(ctx.db, botAccountId);
+    if (!bot || (bot.owner_user_id !== user.id && !user.is_admin)) {
+      return reply.code(403).send({ error: "forbidden" });
+    }
+    const peer = await setPeerRemark(ctx.db, botAccountId, peerId, remark);
+    await writeAudit(ctx.db, "peer_remark_updated", user.id, { botAccountId, peerId });
+    return { peer };
+  });
+
   app.delete<{ Params: { botId: string } }>(
     "/api/v1/me/bots/:botId",
     async (req, reply) => {
@@ -1740,12 +1760,18 @@ export async function registerRoutes(
     },
   );
 
-  /** Service catalog for the Persona editor. A service can be opened by the
-   * Persona owner, but creation/editing of the service itself remains super-admin. */
+  /** Only return services already opened to the requested Persona. Opening a
+   * service is controlled from super-admin service management, not this view. */
   app.get("/api/v1/me/published-scheduled-services", async (req, reply) => {
     const user = await requireUser(req, reply, ctx); if (!user) return;
+    const { personaId } = req.query as { personaId?: string };
+    if (!personaId) return { services: [] };
+    const persona = await getPersona(ctx.db, personaId);
+    if (!persona || (persona.owner_user_id !== user.id && !user.is_admin)) return reply.code(403).send({ error: "forbidden" });
     const services = await listSystemSubscriptionServices(ctx.db);
-    return { services: services.map(({ prompt_template, ...safe }) => safe) };
+    const opened = [] as typeof services;
+    for (const service of services) if (await isServiceOpenToPersona(ctx.db, service.id, personaId)) opened.push(service);
+    return { services: opened.map(({ prompt_template, ...safe }) => safe) };
   });
 
   /** GET chatflow graph (owner or public read for try/editor load). */

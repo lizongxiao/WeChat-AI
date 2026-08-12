@@ -970,9 +970,8 @@ export class BotWorkerManager {
     }
   }
 
-  /** Scheduled replies deliberately share the same part sanitizer and sender as
-   * ordinary chat. Sending `result.text` in one admin push made iLink render
-   * line-oriented replies as one paragraph on some clients. */
+  /** Scheduled replies use the normal text sanitizer and iLink sender, but are
+   * intentionally one message so long reports are not capped at five bubbles. */
   private async sendScheduledReply(
     botId: string,
     peerId: string,

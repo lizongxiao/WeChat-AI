@@ -317,6 +317,9 @@ export function buildChatMessages(params: {
   userText: string;
   /** Bot display name for identity + {{bot_name}} substitution */
   botName?: string;
+  /** Assigned Persona name. It is the conversational identity, while botName
+   * remains the communication account name and template-variable value. */
+  personaName?: string;
   /** Append multi-bubble JSON output instruction (default true) */
   multiBubbleJson?: boolean;
   /** Enabled stickers for prompt catalog (omit or empty → text-only format) */
@@ -328,7 +331,7 @@ export function buildChatMessages(params: {
 }): ChatMessage[] {
   const botName = params.botName?.trim() || "助手";
   const personaBody = applyPromptTemplate(params.systemPrompt, { botName });
-  const identity = buildBotIdentityBlock(botName);
+  const identity = buildBotIdentityBlock(params.personaName?.trim() || botName);
 
   const memoryBlock = buildMemoryBlock(params.memories);
   const stickerBlock = buildStickerCatalogBlock(params.stickers);
@@ -426,13 +429,14 @@ export function buildProactiveMessages(params: {
   history: MessageRow[];
   idleHours: number;
   botName?: string;
+  personaName?: string;
   multiBubbleJson?: boolean;
   stickers?: StickerPromptEntry[];
   timeToolEnabled?: boolean;
 }): ChatMessage[] {
   const botName = params.botName?.trim() || "助手";
   const personaBody = applyPromptTemplate(params.systemPrompt, { botName });
-  const identity = buildBotIdentityBlock(botName);
+  const identity = buildBotIdentityBlock(params.personaName?.trim() || botName);
   const memoryBlock = buildMemoryBlock(params.memories);
   const stickerBlock = buildStickerCatalogBlock(params.stickers);
   const timeBlock = buildTimeToolBlock(params.timeToolEnabled);

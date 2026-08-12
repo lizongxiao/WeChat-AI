@@ -29,6 +29,7 @@ import {
 } from "@wechat-ai/llm";
 import {
   buildChatMessages,
+  buildBotIdentityBlock,
   buildImageCaptionMessages,
   buildMemoryExtractMessages,
   buildProactiveMessages,
@@ -672,7 +673,7 @@ export class ChatService {
         // the `[图片]` placeholder rather than the image itself.
         userText: historyText,
         botName,
-        systemPrompt,
+        systemPrompt: `${buildBotIdentityBlock(persona.display_name)}\n\n${systemPrompt}`,
         history: history.map((m) => ({ role: m.role, content: m.content })),
         memories: selectedMemories.map((m) => m.content),
         webSearchEnabled: Boolean(persona.web_search_enabled),
@@ -688,6 +689,7 @@ export class ChatService {
         history,
         userText: req.text,
         botName,
+        personaName: persona.display_name,
         multiBubbleJson: this.primaryMultiBubbleJson(),
         stickers,
         timeToolEnabled: this.opts.timeToolEnabled !== false,
@@ -840,6 +842,7 @@ export class ChatService {
       history,
       idleHours: req.idleHours,
       botName,
+      personaName: persona.display_name,
       multiBubbleJson: this.primaryMultiBubbleJson(),
       stickers,
       timeToolEnabled: this.opts.timeToolEnabled !== false,
@@ -933,15 +936,21 @@ export class ChatService {
     const botName = bot?.display_name?.trim() || "助手";
     const stickers = this.opts.stickersEnabled === false || !bot?.owner_user_id ? [] : await listStickersForOwnerPrompt(this.db, bot.owner_user_id);
     const selectedMemories = selectMemoriesForPrompt(memories, req.prompt, { topK: this.opts.memoryTopK, fullInjectMax: this.opts.memoryFullInjectMax });
-    const messages = buildChatMessages({ systemPrompt, memories: selectedMemories, history, userText: `这是已确认的定时任务，请立即执行并直接给用户推送结果：\n${req.prompt}`, botName, multiBubbleJson: this.primaryMultiBubbleJson(), stickers, timeToolEnabled: this.opts.timeToolEnabled !== false });
+    const messages = buildChatMessages({ systemPrompt, memories: selectedMemories, history, userText: `这是已确认的定时任务，请立即执行并直接给用户推送结果：\n${req.prompt}`, botName, personaName: persona.display_name, multiBubbleJson: false, stickers, timeToolEnabled: this.opts.timeToolEnabled !== false });
     const { client, callOpts } = await this.resolveChatClient({ persona: { ...persona, web_search_enabled: req.webSearchEnabled && persona.web_search_enabled ? 1 : 0 }, ownerUserId: bot?.owner_user_id });
     const usage = await client.chatWithUsage(messages, callOpts);
     const owner = bot?.owner_user_id ? await getUser(this.db, bot.owner_user_id) : undefined;
     await recordTokenUsage(this.db, { userId: bot?.owner_user_id, botId: req.botAccountId, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, username: owner?.username, botName: bot?.display_name });
     const finalized = await this.finalizeReplyParts({ rawLlmText: usage.text, stickers, botAccountId: req.botAccountId, ownerUserId: bot?.owner_user_id, ownerUsername: owner?.username, botName: bot?.display_name });
     if (!finalized.displayText.trim()) return { kind: "skip", skipReason: "empty_reply" };
-    await insertMessage(this.db, { botAccountId:req.botAccountId, peerId:req.peerId, personaId:persona.id, role:"assistant", content:finalized.displayText, contextToken:req.contextToken });
-    return { kind:"reply", text:finalized.displayText, bubbles:finalized.bubbles, parts:finalized.parts, bubblesFromJson:finalized.bubblesFromJson, personaId:persona.id, personaSlug:persona.slug, ownerUserId:bot?.owner_user_id };
+    // Scheduled output is one WeChat message, not a roleplay bubble sequence.
+    // For ordinary text retain the model's paragraph layout exactly; the normal
+    // reply formatter intentionally splits on newlines and caps at five parts.
+    const deliveryText = finalized.bubblesFromJson
+      ? finalized.displayText
+      : usage.text.replace(/\r\n?/g, "\n").trim();
+    await insertMessage(this.db, { botAccountId:req.botAccountId, peerId:req.peerId, personaId:persona.id, role:"assistant", content:deliveryText, contextToken:req.contextToken });
+    return { kind:"reply", text:deliveryText, bubbles:[deliveryText], parts:[{kind:"text",text:deliveryText}], bubblesFromJson:false, personaId:persona.id, personaSlug:persona.slug, ownerUserId:bot?.owner_user_id };
   }
 
   async extractMemory(

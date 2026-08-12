@@ -257,6 +257,8 @@ export interface Peer {
   bot_account_id: string;
   peer_id: string;
   display_name: string | null;
+  /** Operator-maintained label; never supplied by WeChat or exposed to the peer. */
+  remark?: string | null;
   approved: number;
   approved_at?: string | null;
   created_at?: string;
@@ -2077,6 +2079,19 @@ export async function setPeerProactiveEnabled(
   } else {
     await db.redis.srem(K.proactivePeersByBot(botAccountId), peerId);
   }
+  return peer;
+}
+
+/** Save a private operator label for identifying a WeChat peer in the console. */
+export async function setPeerRemark(
+  db: RedisStore,
+  botAccountId: string,
+  peerId: string,
+  remark: string,
+): Promise<Peer> {
+  const peer = await ensurePeer(db, botAccountId, peerId);
+  peer.remark = remark.trim().slice(0, 80) || null;
+  await db.setJson(K.peer(botAccountId, peerId), peer);
   return peer;
 }
 

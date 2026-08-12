@@ -3084,8 +3084,8 @@
               </select>
             </label>
             <label class="form-field" style="grid-column:1/-1">可订阅定时服务
-              <select id="pubServiceIds" multiple size="4" title="选择此人设向用户开放的系统订阅服务"></select>
-              <span class="field-hint">按住 Ctrl / ⌘ 可多选；只显示已发布且启用的服务。</span>
+              <select id="pubServiceIds" multiple size="4" title="当前人设已开放的系统订阅服务" disabled></select>
+              <span class="field-hint">仅显示当前人设已开放的服务；请由超管在“定时服务管理”中调整开放人设。</span>
             </label>
           </div>
           <label class="check-row">
@@ -4536,6 +4536,7 @@
         }
         <button class="btn btn-secondary btn-sm" type="button" data-as="${esc(key)}">分配人设</button>
         <button class="btn btn-secondary btn-sm" type="button" data-sub="${esc(key)}" ${p.approved ? "" : "disabled title=\"请先批准用户\""}>订阅服务</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-remark="${esc(key)}">备注</button>
         <button class="btn btn-ghost btn-sm" type="button" data-mem="${esc(key)}">记忆</button>
       </div>`;
     }
@@ -4679,6 +4680,19 @@
           } catch (e) { toast(e.message || "无法获取可订阅服务", true); }
         };
       });
+      document.querySelectorAll("[data-remark]").forEach((btn) => {
+        btn.onclick = async () => {
+          const [botAccountId, peerId] = btn.dataset.remark.split("|");
+          const peer = (state.peers || []).find((item) => item.bot_account_id === botAccountId && item.peer_id === peerId);
+          const remark = window.prompt("微信用户备注（最多 80 字）", peer?.remark || "");
+          if (remark === null) return;
+          try {
+            await api("/api/v1/me/peers/remark", { method: "PATCH", body: { botAccountId, peerId, remark } });
+            toast(remark.trim() ? "备注已保存" : "备注已清除");
+            loadPeers();
+          } catch (e) { toast(e.message || "保存备注失败", true); }
+        };
+      });
       document.querySelectorAll("[data-mem]").forEach((btn) => {
         btn.onclick = async () => {
           const [botAccountId, peerId] = btn.dataset.mem.split("|");
@@ -4807,6 +4821,7 @@
       const q = botId ? "?botId=" + encodeURIComponent(botId) : "";
       const data = await api("/api/v1/me/peers" + q);
       const peers = data.peers || [];
+      state.peers = peers;
       const botLabel = (id) => {
         const b = (state.bots || []).find((x) => x.id === id);
         return b?.displayName || id;
@@ -4820,6 +4835,7 @@
             return `<tr>
           <td>
             <div class="id-cell" title="${esc(p.peer_id)}">
+              ${p.remark ? `<strong>${esc(p.remark)}</strong>` : ""}
               <code>${esc(p.peer_id)}</code>
             </div>
           </td>
@@ -4848,6 +4864,7 @@
               <p class="m-meta">
                 ${peerStatusBadge(p)}
                 · 当前人设 ${esc(p.personaName || "默认")}<br/>
+                ${p.remark ? `备注：${esc(p.remark)}<br/>` : ""}
                 <code title="${esc(p.peer_id)}">${esc(p.peer_id)}</code>
               </p>
               <div style="margin:10px 0 8px">${peerPersonaSelectHtml(p)}</div>
@@ -5771,15 +5788,19 @@
       void loadPublishedScheduledServices();
     }
 
-    async function loadPublishedScheduledServices(selectedIds = []) {
+    async function loadPublishedScheduledServices(personaId, selectedIds = []) {
       const select = $("pubServiceIds");
       if (!select) return;
+      if (!personaId) {
+        select.innerHTML = '<option disabled>保存人设后，由超管开放可订阅服务</option>';
+        return;
+      }
       try {
-        const data = await api("/api/v1/me/published-scheduled-services");
+        const data = await api("/api/v1/me/published-scheduled-services?personaId=" + encodeURIComponent(personaId));
         const selected = new Set(selectedIds);
         select.innerHTML = (data.services || []).map((s) =>
           `<option value="${esc(s.id)}" ${selected.has(s.id) ? "selected" : ""}>${esc(s.name)} · ${esc(s.schedule)} (${esc(s.timezone)})</option>`,
-        ).join("") || '<option disabled>暂无已发布的定时服务</option>';
+        ).join("") || '<option disabled>当前人设未开放定时服务</option>';
       } catch (e) {
         select.innerHTML = '<option disabled>定时服务加载失败</option>';
       }
@@ -5804,7 +5825,7 @@
         if ($("pubWebSearch")) {
           $("pubWebSearch").checked = Boolean(p.webSearchEnabled);
         }
-        await loadPublishedScheduledServices(p.serviceIds || []);
+        await loadPublishedScheduledServices(p.id, p.serviceIds || []);
         await fillPubLlmSelect(p.llmProviderId || "");
         $("editorTitle").textContent = "编辑人设";
         $("pubSubmit").textContent = "保存修改";

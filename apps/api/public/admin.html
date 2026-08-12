@@ -4228,19 +4228,22 @@
         <h1 class="page-title">定时服务管理</h1>
         <p class="page-sub">系统订阅服务与用户自建任务分开管理；仅超管可见。</p>
         <div class="panel form-grid" style="margin-bottom:16px">
-          <h3 style="grid-column:1/-1;margin:0">新建系统订阅服务</h3>
+          <h3 id="ssFormTitle" style="grid-column:1/-1;margin:0">新建系统订阅服务</h3>
+          <input id="ssEditId" type="hidden" />
           <label>名称<input id="ssName" placeholder="每日天气预报" /></label>
-          <label>执行计划（Cron）<input id="ssSchedule" placeholder="0 8 * * *" /></label>
+          <label>频率<select id="ssFrequency"><option value="daily">每天</option><option value="weekly">每周</option></select></label>
+          <label id="ssWeekdayWrap" hidden>星期<select id="ssWeekday"><option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="0">周日</option></select></label>
+          <label>执行时间<input id="ssTime" type="time" value="08:00" /></label>
           <label>时区<input id="ssTimezone" value="Asia/Shanghai" /></label>
           <label class="check-label"><input id="ssWeb" type="checkbox" />允许联网搜索</label>
           <label style="grid-column:1/-1">描述<input id="ssDescription" /></label>
           <label style="grid-column:1/-1">Prompt 模板<textarea id="ssPrompt" placeholder="联网查询今天 {{location}} 的天气并简要推送。"></textarea></label>
           <label style="grid-column:1/-1">参数 Schema（JSON）<textarea id="ssSchema" placeholder='{"required":["location"],"properties":{"location":{"type":"string"}}}'></textarea></label>
-          <label style="grid-column:1/-1">开放 Persona（逗号分隔 ID）<input id="ssPersonas" placeholder="persona_xxx, persona_yyy" /></label>
-          <div class="row-actions"><button class="btn btn-primary" id="ssCreate" type="button">创建服务</button><button class="btn btn-secondary" id="ssRefresh" type="button">刷新</button></div>
+          <label style="grid-column:1/-1">开放 Persona（可多选）<select id="ssPersonas" multiple size="5"></select></label>
+          <div class="row-actions"><button class="btn btn-primary" id="ssCreate" type="button">创建服务</button><button class="btn btn-secondary" id="ssCancelEdit" type="button" hidden>取消编辑</button><button class="btn btn-secondary" id="ssRefresh" type="button">刷新</button></div>
         </div>
-        <div class="panel"><h3>系统订阅服务</h3><div id="ssServices" class="empty">加载中…</div></div>
-        <div class="panel" style="margin-top:16px"><h3>用户自建任务</h3><div id="ssTasks" class="empty">加载中…</div></div>
+        <div class="panel"><h3>系统订阅服务</h3><div class="table-wrap"><table class="data-table"><thead><tr><th>服务名称</th><th>开放 Persona</th><th>订阅人数</th><th>执行计划</th><th>状态</th><th>管理</th></tr></thead><tbody id="ssServices"></tbody></table></div></div>
+        <div class="panel" style="margin-top:16px"><h3>用户自建任务</h3><div class="table-wrap"><table class="data-table"><thead><tr><th>用户 / Peer</th><th>Bot</th><th>Persona</th><th>任务</th><th>执行计划</th><th>下次执行</th><th>状态</th><th>来源</th><th>管理</th></tr></thead><tbody id="ssTasks"></tbody></table></div></div>
       </section>
 
       <section id="personas">
@@ -8402,20 +8405,30 @@
     }
 
     async function loadSchedules(_force) {
-      const [servicesData, tasksData] = await Promise.all([
+      const [servicesData, tasksData, personasData] = await Promise.all([
         api("/api/v1/admin/scheduled-services"),
         api("/api/v1/admin/scheduled-tasks"),
+        api("/api/v1/admin/personas?includeDisabled=1"),
       ]);
       const services = servicesData.services || [];
       const tasks = tasksData.tasks || [];
-      $("ssServices").innerHTML = services.length ? services.map((s) => `<div class="detail-row" style="padding:12px 0;border-bottom:1px solid var(--separator)"><div><strong>${esc(s.name)}</strong> ${s.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge warn">停用</span>'}<div class="muted">${esc(s.schedule)} · ${esc(s.timezone)} · ${s.subscriberCount || 0} 位订阅者</div><div class="muted">Persona：${esc((s.personaIds || []).join(", ") || "未开放")}</div></div><div class="row-actions"><button class="btn btn-secondary btn-sm" data-ss-toggle="${esc(s.id)}" data-ss-enabled="${s.enabled ? "0" : "1"}">${s.enabled ? "停用" : "启用"}</button><button class="btn btn-danger btn-sm" data-ss-delete="${esc(s.id)}">删除</button></div></div>`).join("") : '<div class="empty">暂无系统订阅服务</div>';
-      $("ssTasks").innerHTML = tasks.length ? tasks.map((t) => `<div class="detail-row" style="padding:12px 0;border-bottom:1px solid var(--separator)"><div><strong>${esc(t.name)}</strong> ${t.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge warn">停用</span>'}<div class="muted">Peer：${esc(t.peer_id)} · Persona：${esc(t.persona_id)} · ${esc(t.schedule)} · 下次：${esc(t.next_run_at || "待计算")}</div><div class="muted">${esc(t.promptSummary || "")}</div></div><div class="row-actions"><button class="btn btn-secondary btn-sm" data-st-toggle="${esc(t.id)}" data-st-enabled="${t.enabled ? "0" : "1"}">${t.enabled ? "停用" : "启用"}</button><button class="btn btn-danger btn-sm" data-st-delete="${esc(t.id)}">删除</button></div></div>`).join("") : '<div class="empty">暂无用户自建任务</div>';
+      const personas = personasData.personas || []; const personaName = (id) => personas.find((p) => p.id === id)?.displayName || id;
+      const parseCron = (cron) => { const f=String(cron||"").split(/\s+/); return { time: f.length===5 ? `${String(f[1]).padStart(2,"0")}:${String(f[0]).padStart(2,"0")}` : "08:00", frequency: f[4] === "*" ? "daily" : "weekly", weekday: f[4] || "1" }; };
+      const cronFromForm = () => { const [h,m]=$("ssTime").value.split(":").map(Number); return `${m} ${h} * * ${$("ssFrequency").value === "weekly" ? $("ssWeekday").value : "*"}`; };
+      const setServiceForm = (s) => { const c=parseCron(s?.schedule); $("ssEditId").value=s?.id||""; $("ssFormTitle").textContent=s?"编辑系统订阅服务":"新建系统订阅服务"; $("ssCreate").textContent=s?"保存服务":"创建服务"; $("ssCancelEdit").hidden=!s; $("ssName").value=s?.name||""; $("ssDescription").value=s?.description||""; $("ssPrompt").value=s?.prompt_template||""; $("ssSchema").value=s?JSON.stringify(s.params_schema||{},null,2):""; $("ssTimezone").value=s?.timezone||"Asia/Shanghai"; $("ssWeb").checked=Boolean(s?.web_search_enabled); $("ssFrequency").value=c.frequency; $("ssWeekday").value=c.weekday; $("ssTime").value=c.time; $("ssWeekdayWrap").hidden=c.frequency!=="weekly"; const selected=new Set(s?.personaIds||[]); $("ssPersonas").innerHTML=personas.map(p=>`<option value="${esc(p.id)}" ${selected.has(p.id)?"selected":""}>${esc(p.displayName)}${p.enabled?"":"（停用）"}</option>`).join(""); };
+      setServiceForm(services.find(s=>s.id===$("ssEditId").value));
+      $("ssServices").innerHTML = services.length ? services.map((s) => `<tr><td><strong>${esc(s.name)}</strong><div class="muted">${esc(s.description||"")}</div></td><td>${esc((s.personaIds||[]).map(personaName).join("、")||"未开放")}</td><td>${s.subscriberCount||0}</td><td>${esc(s.schedule)}<div class="muted">${esc(s.timezone)}</div></td><td>${s.enabled?'<span class="badge ok">启用</span>':'<span class="badge warn">停用</span>'}</td><td><div class="row-actions"><button class="btn btn-secondary btn-sm" data-ss-edit="${esc(s.id)}">编辑</button><button class="btn btn-secondary btn-sm" data-ss-toggle="${esc(s.id)}" data-ss-enabled="${s.enabled?"0":"1"}">${s.enabled?"停用":"启用"}</button><button class="btn btn-danger btn-sm" data-ss-delete="${esc(s.id)}">删除</button></div></td></tr>`).join("") : '<tr><td colspan="6" class="empty">暂无系统订阅服务</td></tr>';
+      $("ssTasks").innerHTML = tasks.length ? tasks.map((t) => `<tr><td>${esc(t.user_id||"—")}<div class="muted">${esc(t.peer_id)}</div></td><td>${esc(t.bot_id)}</td><td>${esc(personaName(t.persona_id))}</td><td><strong>${esc(t.name)}</strong><div class="muted">${esc(t.promptSummary||"")}</div></td><td>${esc(t.schedule)}<div class="muted">${esc(t.timezone)}</div></td><td>${esc(t.next_run_at||"待计算")}</td><td>${t.enabled?'<span class="badge ok">启用</span>':'<span class="badge warn">停用</span>'}</td><td>${esc(t.created_via||"chat")}</td><td><div class="row-actions"><button class="btn btn-secondary btn-sm" data-st-edit="${esc(t.id)}">编辑</button><button class="btn btn-secondary btn-sm" data-st-toggle="${esc(t.id)}" data-st-enabled="${t.enabled?"0":"1"}">${t.enabled?"停用":"启用"}</button><button class="btn btn-danger btn-sm" data-st-delete="${esc(t.id)}">删除</button></div></td></tr>`).join("") : '<tr><td colspan="9" class="empty">暂无用户自建任务</td></tr>';
+      document.querySelectorAll("[data-ss-edit]").forEach((b)=>b.onclick=()=>setServiceForm(services.find(s=>s.id===b.dataset.ssEdit)));
       document.querySelectorAll("[data-ss-toggle]").forEach((b) => b.onclick = async () => { await api("/api/v1/admin/scheduled-services/" + encodeURIComponent(b.dataset.ssToggle), {method:"PUT", body:{enabled:b.dataset.ssEnabled === "1"}}); await loadSchedules(true); });
       document.querySelectorAll("[data-ss-delete]").forEach((b) => b.onclick = async () => { if (!await confirmDialog("删除服务", "会阻止后续执行，确认删除？")) return; await api("/api/v1/admin/scheduled-services/" + encodeURIComponent(b.dataset.ssDelete), {method:"DELETE"}); await loadSchedules(true); });
       document.querySelectorAll("[data-st-toggle]").forEach((b) => b.onclick = async () => { await api("/api/v1/admin/scheduled-tasks/" + encodeURIComponent(b.dataset.stToggle) + "/manage", {method:"POST", body:{enabled:b.dataset.stEnabled === "1"}}); await loadSchedules(true); });
       document.querySelectorAll("[data-st-delete]").forEach((b) => b.onclick = async () => { if (!await confirmDialog("删除任务", "确认删除此用户任务？")) return; await api("/api/v1/admin/scheduled-tasks/" + encodeURIComponent(b.dataset.stDelete) + "/manage", {method:"POST", body:{delete:true}}); await loadSchedules(true); });
+      document.querySelectorAll("[data-st-edit]").forEach((b)=>b.onclick=async()=>{const d=await api("/api/v1/admin/scheduled-tasks/"+encodeURIComponent(b.dataset.stEdit));const t=d.task;const name=prompt("任务名称",t.name);if(name===null)return;const taskPrompt=prompt("任务 Prompt",t.prompt);if(taskPrompt===null)return;const time=prompt("执行时间（HH:MM）",parseCron(t.schedule).time);if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time||"")){toast("时间格式应为 HH:MM",true);return;}const [h,m]=time.split(":").map(Number);await api("/api/v1/admin/scheduled-tasks/"+encodeURIComponent(t.id),{method:"PUT",body:{name,prompt:taskPrompt,schedule:`${m} ${h} * * *`,timezone:t.timezone,webSearchEnabled:Boolean(t.web_search_enabled)}});toast("任务已更新");await loadSchedules(true);});
       $("ssRefresh").onclick = () => loadSchedules(true).catch((e) => toast(e.message, true));
-      $("ssCreate").onclick = async () => { try { const schemaText=$("ssSchema").value.trim(); const personaIds=$("ssPersonas").value.split(/[,，]/).map(x=>x.trim()).filter(Boolean); await api("/api/v1/admin/scheduled-services", {method:"POST",body:{name:$("ssName").value.trim(),description:$("ssDescription").value.trim(),promptTemplate:$("ssPrompt").value.trim(),paramsSchema:schemaText?JSON.parse(schemaText):{},schedule:$("ssSchedule").value.trim(),timezone:$("ssTimezone").value.trim()||"Asia/Shanghai",webSearchEnabled:$("ssWeb").checked,personaIds}}); toast("服务已创建"); await loadSchedules(true); } catch(e) { toast(e.message || "创建失败", true); } };
+      $("ssFrequency").onchange=()=>$("ssWeekdayWrap").hidden=$("ssFrequency").value!=="weekly";
+      $("ssCancelEdit").onclick=()=>setServiceForm(null);
+      $("ssCreate").onclick = async () => { try { const schemaText=$("ssSchema").value.trim(); const personaIds=Array.from($("ssPersonas").selectedOptions).map(o=>o.value); const body={name:$("ssName").value.trim(),description:$("ssDescription").value.trim(),promptTemplate:$("ssPrompt").value.trim(),paramsSchema:schemaText?JSON.parse(schemaText):{},schedule:cronFromForm(),timezone:$("ssTimezone").value.trim()||"Asia/Shanghai",webSearchEnabled:$("ssWeb").checked,personaIds}; const id=$("ssEditId").value; await api(id?"/api/v1/admin/scheduled-services/"+encodeURIComponent(id):"/api/v1/admin/scheduled-services", {method:id?"PUT":"POST",body}); toast(id?"服务已更新":"服务已创建"); $("ssEditId").value=""; await loadSchedules(true); } catch(e) { toast(e.message || "保存失败", true); } };
     }
 
     async function loadTab(tab) {

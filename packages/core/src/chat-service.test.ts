@@ -19,6 +19,8 @@ const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 
 class FakeLlm implements Pick<LlmClient, "chat" | "chatWithUsage"> {
   calls = 0;
+  lastMessages: unknown;
+  lastOpts: unknown;
   constructor(private reply: string | string[]) {}
   private next(): string {
     this.calls++;
@@ -29,7 +31,9 @@ class FakeLlm implements Pick<LlmClient, "chat" | "chatWithUsage"> {
   async chat(): Promise<string> {
     return this.next();
   }
-  async chatWithUsage(_messages?: unknown, _opts?: unknown) {
+  async chatWithUsage(messages?: unknown, opts?: unknown) {
+    this.lastMessages = messages;
+    this.lastOpts = opts;
     return {
       text: this.next(),
       promptTokens: 10,
@@ -346,10 +350,13 @@ describe("ChatService multi-user isolation (Redis)", () => {
     await upsertBotAccount(db,{id:botId,ownerUserId:"u_test",displayName:"test",botToken:"test-token"});
     await approvePeer(db,botId,peerId);
     await setAssignment(db,botId,peerId,girlfriend!.id);
-    const chat=new ChatService(db,asLlm(new FakeLlm("定时结果")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false});
+    const fake=new FakeLlm("定时结果");
+    const chat=new ChatService(db,asLlm(fake),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false});
     const result=await chat.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"发送日报",webSearchEnabled:false});
     assert.equal(result.kind,"reply");
     assert.equal(result.personaId,cat!.id);
+    assert.equal((fake.lastMessages as unknown[]).length,2,"scheduled execution must not replay recent chat");
+    assert.match(JSON.stringify(fake.lastMessages),/定时任务执行规则/);
     await db.close();
   });
 });

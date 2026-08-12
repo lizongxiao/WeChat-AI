@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { cronMatches, nextCronRun, scheduledTestLockSource } from "./scheduled-scheduler.js";
+import { cronMatches, nextCronRun, scheduledPreviewTime, scheduledTestLockSource } from "./scheduled-scheduler.js";
 
 describe("scheduled cron matching", () => {
   it("uses the task timezone, not the worker timezone", () => {
@@ -27,5 +27,16 @@ describe("scheduled cron matching", () => {
     // It must still send rather than being reported as a duplicate execution.
     assert.notEqual(scheduledTestLockSource("subscription"), "subscription");
     assert.equal(scheduledTestLockSource("subscription"), "subscription:test");
+  });
+
+  it("previews a service at its next planned execution time", () => {
+    assert.equal(
+      scheduledPreviewTime(
+        "0 9 * * *",
+        "Asia/Shanghai",
+        new Date("2026-08-12T09:28:00.000Z"),
+      ),
+      "2026-08-13T01:00:00.000Z",
+    );
   });
 });

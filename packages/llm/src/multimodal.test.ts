@@ -105,6 +105,16 @@ describe("flattenChatContent", () => {
 });
 
 describe("multimodal messages (platform path)", () => {
+  it("can require the first tool call for fresh-data schedules", async () => {
+    const captured = installFetch();
+    await platform().chatWithUsage(
+      [{ role: "user", content: "查询今天上海天气" }],
+      { tools: ["web_search"], requireToolUse: true },
+    );
+
+    assert.equal(captured[0]?.body.tool_choice, "required");
+  });
+
   it("forwards user content parts verbatim", async () => {
     const captured = installFetch();
     const res = await platform().chatWithUsage([

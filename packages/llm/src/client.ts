@@ -103,6 +103,8 @@ export type BuiltinToolName = "get_current_time" | "web_search";
 export interface ChatCallOptions {
   /** Whitelist of built-in tools to expose (empty / omit = no tools) */
   tools?: BuiltinToolName[];
+  /** Require a tool call in the first round (used by fresh-data schedules). */
+  requireToolUse?: boolean;
   /** IANA timezone for get_current_time (default Asia/Shanghai) */
   timeZone?: string;
   /** Max tool round-trips (default 2) */
@@ -379,6 +381,7 @@ export class LlmClient {
         upstream,
         modelOverride,
         maxTokensOverride,
+        round === 0 && opts.requireToolUse === true,
       );
 
       const usage = res.usage;
@@ -437,6 +440,7 @@ export class LlmClient {
     upstream: LlmUpstream | null | undefined,
     modelOverride?: string | null,
     maxTokensOverride?: number | null,
+    requireToolUse = false,
   ) {
     // User custom path: must go through tools with upstream body field.
     if (upstream) {
@@ -445,6 +449,7 @@ export class LlmClient {
         tools,
         upstream,
         maxTokensOverride,
+        requireToolUse,
       );
     }
     // Platform path: direct OpenAI SDK (admin-configured LLM).
@@ -453,7 +458,9 @@ export class LlmClient {
       messages: apiMessages,
       temperature: this.temperature,
       max_tokens: maxTokensOverride ?? this.maxTokens,
-      ...(tools ? { tools, tool_choice: "auto" as const } : {}),
+      ...(tools
+        ? { tools, tool_choice: requireToolUse ? ("required" as const) : ("auto" as const) }
+        : {}),
     });
   }
 
@@ -466,6 +473,7 @@ export class LlmClient {
     tools: ChatCompletionTool[] | undefined,
     upstream: LlmUpstream,
     maxTokensOverride?: number | null,
+    requireToolUse = false,
   ) {
     const toolsRoot = this.toolsBaseUrl;
     if (!toolsRoot) {
@@ -487,7 +495,7 @@ export class LlmClient {
     };
     if (tools?.length) {
       body.tools = tools;
-      body.tool_choice = "auto";
+      body.tool_choice = requireToolUse ? "required" : "auto";
     }
 
     const headers: Record<string, string> = {

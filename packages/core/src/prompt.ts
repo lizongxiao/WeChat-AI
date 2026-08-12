@@ -370,6 +370,113 @@ export function buildChatMessages(params: {
   return messages;
 }
 
+function formatScheduledExecutionTime(iso: string, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(iso));
+  const value = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("year")}-${value("month")}-${value("day")} ${value("hour")}:${value("minute")}`;
+}
+
+/**
+ * Scheduled deliveries are isolated from short-term chat history so an old
+ * conversation cannot turn a bulletin into a continuation of the last turn.
+ * Only super-admin service templates may be promoted into the system message;
+ * user-authored tasks remain an ordinary user instruction.
+ */
+export function buildScheduledMessages(params: {
+  systemPrompt: string;
+  memories: MemoryRow[];
+  scheduledPrompt: string;
+  botName?: string;
+  personaName?: string;
+  executionTime: string;
+  timeZone: string;
+  webSearchRequired: boolean;
+  trustedInstruction?: boolean;
+}): ChatMessage[] {
+  const botName = params.botName?.trim() || "助手";
+  const identity = buildBotIdentityBlock(
+    params.personaName?.trim() || botName,
+  );
+  const personaBody = applyPromptTemplate(params.systemPrompt, { botName });
+  const memoryBlock = buildMemoryBlock(params.memories);
+  const executionTime = formatScheduledExecutionTime(
+    params.executionTime,
+    params.timeZone,
+  );
+  const executionBlock = [
+    "## 定时任务执行规则",
+    `本次任务的业务执行时间是 ${executionTime}（${params.timeZone}）。所有“今天、早上、日期”等相对时间均以此时间为准，不要根据实际调用时刻改写任务。`,
+    "这是独立的定时推送，不是在续接最近一轮聊天。",
+    "任务内容与格式要求优先于 Persona；Persona 只决定措辞、语气和称呼，不得删减任务要求的栏目。",
+    params.webSearchRequired
+      ? "本任务要求实时信息：必须先调用 web_search，未获得搜索结果时不得凭记忆编造。"
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const trustedTaskBlock = params.trustedInstruction
+    ? `## 必须执行的系统订阅任务\n${params.scheduledPrompt.trim()}`
+    : "";
+  const system = [
+    identity,
+    personaBody,
+    memoryBlock,
+    executionBlock,
+    trustedTaskBlock,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const userInstruction = params.trustedInstruction
+    ? "请现在执行以上系统订阅任务，并直接输出最终发送给用户的内容。"
+    : `请现在执行这条已确认的定时任务，并直接输出最终发送给用户的内容：\n${params.scheduledPrompt.trim()}`;
+  return [
+    { role: "system", content: system },
+    { role: "user", content: userInstruction },
+  ];
+}
+
+/** Validate only requirements explicitly present in a scheduled template. */
+export function scheduledOutputIssues(prompt: string, output: string): string[] {
+  const issues: string[] = [];
+  const requiredLabels = [
+    "🌤️",
+    "🌡️ 温度",
+    "☁️ 天气",
+    "🌧️ 降雨",
+    "💨 风力",
+    "👕 穿衣",
+    "☂️ 出行",
+    "今日寄语",
+  ];
+  for (const label of requiredLabels) {
+    if (prompt.includes(label) && !output.includes(label)) {
+      issues.push(`缺少栏目：${label}`);
+    }
+  }
+  if (/保留换行/.test(prompt) && !output.includes("\n")) {
+    issues.push("没有保留换行");
+  }
+  const range = prompt.match(/(\d+)\s*[~～-]\s*(\d+)\s*字/);
+  if (range) {
+    const min = Number(range[1]);
+    const max = Number(range[2]);
+    const length = [...output.trim()].length;
+    if (length < min || length > max) {
+      issues.push(`字数为 ${length}，要求 ${min}~${max} 字`);
+    }
+  }
+  return issues;
+}
+
 /** Proactive outreach: no new user message; model may skip. */
 export function buildProactiveInstruction(idleHours: number): string {
   const h =

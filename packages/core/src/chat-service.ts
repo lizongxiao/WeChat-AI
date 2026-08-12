@@ -33,9 +33,11 @@ import {
   buildImageCaptionMessages,
   buildMemoryExtractMessages,
   buildProactiveMessages,
+  buildScheduledMessages,
   describeAttachments,
   parseFactsJson,
   parseProactiveSkip,
+  scheduledOutputIssues,
   type PromptAttachment,
 } from "./prompt.js";
 import {
@@ -143,6 +145,11 @@ export interface ScheduledChatRequest {
   personaId: string;
   prompt: string;
   webSearchEnabled: boolean;
+  /** System subscriptions are authored by super-admins; chat tasks are not. */
+  source?: "task" | "subscription";
+  /** Logical schedule time, which can differ from wall time during a preview. */
+  executionTime?: string;
+  timeZone?: string;
 }
 
 export interface InboundChatResult {
@@ -282,17 +289,23 @@ export class ChatService {
   private async resolveChatClient(params: {
     persona: { llm_provider_id?: string | null; web_search_enabled?: number };
     ownerUserId?: string | null;
+    forceWebSearch?: boolean;
+    includeTimeTool?: boolean;
   }): Promise<{
     client: LlmClient;
     callOpts: ChatCallOptions;
   }> {
     const tools: BuiltinToolName[] = [];
-    if (this.opts.timeToolEnabled !== false) {
+    if (
+      this.opts.timeToolEnabled !== false &&
+      params.includeTimeTool !== false
+    ) {
       tools.push("get_current_time");
     }
     const wantSearch =
       this.opts.webSearchEnabled === true &&
-      Boolean(params.persona.web_search_enabled) &&
+      (params.forceWebSearch === true ||
+        Boolean(params.persona.web_search_enabled)) &&
       this.webSearch;
     if (wantSearch) {
       tools.push("web_search");
@@ -927,20 +940,67 @@ export class ChatService {
     // Scheduler tasks intentionally use the prompt-mode tool chain. A chatflow
     // cannot safely accept an arbitrary persisted instruction as a graph input.
     if (persona.mode === "chatflow") return { kind: "skip", skipReason: "chatflow_unsupported" };
-    const [systemPrompt, bot, history, memories] = await Promise.all([
+    this.syncWebSearch();
+    if (
+      req.webSearchEnabled &&
+      (this.opts.webSearchEnabled !== true || !this.webSearch)
+    ) {
+      return { kind: "skip", skipReason: "web_search_unavailable" };
+    }
+    const [systemPrompt, bot, memories] = await Promise.all([
       getPublishedPrompt(this.db, persona.id), getBotAccount(this.db, req.botAccountId),
-      listRecentMessages(this.db, req.botAccountId, req.peerId, this.opts.shortHistoryLimit, persona.id),
       listMemories(this.db, req.botAccountId, req.peerId, persona.id),
     ]);
     if (!systemPrompt) return { kind: "skip", skipReason: "persona_prompt_missing" };
     const botName = bot?.display_name?.trim() || "助手";
     const stickers = this.opts.stickersEnabled === false || !bot?.owner_user_id ? [] : await listStickersForOwnerPrompt(this.db, bot.owner_user_id);
     const selectedMemories = selectMemoriesForPrompt(memories, req.prompt, { topK: this.opts.memoryTopK, fullInjectMax: this.opts.memoryFullInjectMax });
-    const messages = buildChatMessages({ systemPrompt, memories: selectedMemories, history, userText: `这是已确认的定时任务，请立即执行并直接给用户推送结果：\n${req.prompt}`, botName, personaName: persona.display_name, multiBubbleJson: false, stickers, timeToolEnabled: this.opts.timeToolEnabled !== false });
-    const { client, callOpts } = await this.resolveChatClient({ persona: { ...persona, web_search_enabled: req.webSearchEnabled && persona.web_search_enabled ? 1 : 0 }, ownerUserId: bot?.owner_user_id });
-    const usage = await client.chatWithUsage(messages, callOpts);
+    const messages = buildScheduledMessages({
+      systemPrompt,
+      memories: selectedMemories,
+      scheduledPrompt: req.prompt,
+      botName,
+      personaName: persona.display_name,
+      executionTime: req.executionTime ?? new Date().toISOString(),
+      timeZone: req.timeZone ?? this.opts.timeToolTimeZone ?? "Asia/Shanghai",
+      webSearchRequired: req.webSearchEnabled,
+      trustedInstruction: req.source === "subscription",
+    });
+    const { client, callOpts } = await this.resolveChatClient({
+      persona,
+      ownerUserId: bot?.owner_user_id,
+      forceWebSearch: req.webSearchEnabled,
+      includeTimeTool: false,
+    });
+    callOpts.requireToolUse = req.webSearchEnabled;
+    let usage = await client.chatWithUsage(messages, callOpts);
+    let issues = scheduledOutputIssues(req.prompt, usage.text);
+    if (issues.length) {
+      const retryMessages = [
+        ...messages,
+        { role: "assistant" as const, content: usage.text },
+        {
+          role: "user" as const,
+          content: `上面的结果未满足定时任务要求：\n- ${issues.join("\n- ")}\n请严格按原任务修正，只输出最终消息。`,
+        },
+      ];
+      const retry = await client.chatWithUsage(retryMessages, callOpts);
+      usage = {
+        ...retry,
+        promptTokens: usage.promptTokens + retry.promptTokens,
+        completionTokens: usage.completionTokens + retry.completionTokens,
+        totalTokens: usage.totalTokens + retry.totalTokens,
+      };
+      issues = scheduledOutputIssues(req.prompt, usage.text);
+    }
     const owner = bot?.owner_user_id ? await getUser(this.db, bot.owner_user_id) : undefined;
     await recordTokenUsage(this.db, { userId: bot?.owner_user_id, botId: req.botAccountId, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, username: owner?.username, botName: bot?.display_name });
+    if (issues.length) {
+      return {
+        kind: "skip",
+        skipReason: `scheduled_output_invalid:${issues.join(";")}`,
+      };
+    }
     const finalized = await this.finalizeReplyParts({ rawLlmText: usage.text, stickers, botAccountId: req.botAccountId, ownerUserId: bot?.owner_user_id, ownerUsername: owner?.username, botName: bot?.display_name });
     if (!finalized.displayText.trim()) return { kind: "skip", skipReason: "empty_reply" };
     // Scheduled output is one WeChat message, not a roleplay bubble sequence.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { validateSubscriptionParams } from "./scheduled-repos.js";
+import { subscriptionMatchesCurrentPersona, validateSubscriptionParams } from "./scheduled-repos.js";
 import { openDatabase } from "./client.js";
 import { createScheduledTask, listPeerScheduledTasks } from "./scheduled-repos.js";
 
@@ -14,6 +14,14 @@ describe("subscription parameter validation", () => {
     assert.deepEqual(validateSubscriptionParams(schema, {}), ["missing:location"]);
     assert.deepEqual(validateSubscriptionParams(schema, { location: "深" }), ["minLength:location"]);
     assert.deepEqual(validateSubscriptionParams(schema, { location: "深圳" }), []);
+  });
+});
+
+describe("subscription current-persona eligibility", () => {
+  const subscription = { id:"sub", user_id:"u", bot_id:"b", peer_id:"p", persona_id:"weather", service_id:"daily-weather", params:{}, enabled:1, created_at:"", updated_at:"" };
+  it("does not count or deliver an old Persona subscription after a peer switches", () => {
+    assert.equal(subscriptionMatchesCurrentPersona(subscription, "weather"), true);
+    assert.equal(subscriptionMatchesCurrentPersona(subscription, "news"), false);
   });
 });
 

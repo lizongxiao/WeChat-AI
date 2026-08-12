@@ -1,6 +1,7 @@
 import type { RedisStore } from "./client.js";
 import { newId, nowIso } from "./client.js";
 import { K } from "./keys.js";
+import { resolvePersonaForPeer } from "./repos.js";
 
 export interface SystemSubscriptionService {
   id: string; name: string; description: string; prompt_template: string;
@@ -13,9 +14,21 @@ export interface UserSubscription {
   created_at: string; updated_at: string; last_run_at?: string | null; next_run_at?: string | null;
   last_status?: string | null; last_error?: string | null;
 }
+/** A subscription is active only while the peer is still using the Persona it
+ * was created under.  Service membership alone is not enough after a switch. */
+export function subscriptionMatchesCurrentPersona(subscription: UserSubscription, currentPersonaId?: string | null) {
+  return Boolean(subscription.enabled && currentPersonaId && subscription.persona_id === currentPersonaId);
+}
+export async function isUserSubscriptionActiveForCurrentPersona(db: RedisStore, subscription: UserSubscription) {
+  if (!subscription.enabled) return false;
+  const persona = await resolvePersonaForPeer(db, subscription.bot_id, subscription.peer_id);
+  return subscriptionMatchesCurrentPersona(subscription, persona?.id);
+}
 export interface ScheduledTask {
   id: string; user_id: string; bot_id: string; peer_id: string; persona_id: string;
   name: string; prompt: string; schedule: string; timezone: string; web_search_enabled: number;
+  /** cron tasks repeat; one_time tasks are removed from the runnable set after execute_at. */
+  schedule_type?: "cron" | "one_time"; execute_at?: string | null;
   enabled: number; created_via: "chat"; created_at: string; updated_at: string;
   last_run_at?: string | null; next_run_at?: string | null; last_status?: string | null; last_error?: string | null;
 }
@@ -66,7 +79,7 @@ export async function getUserSubscription(db: RedisStore, id: string) { return d
 export async function updateUserSubscription(db: RedisStore, id: string, patch: Partial<UserSubscription>) { const old = await getUserSubscription(db,id); if (!old) throw new Error("subscription_not_found"); const row={...old,...patch,id,updated_at:nowIso()}; await db.setJson(K.scheduledSubscription(id),row); return row; }
 export async function deleteUserSubscription(db: RedisStore, id: string) { const r=await getUserSubscription(db,id); if (!r) return; await db.redis.multi().del(K.scheduledSubscription(id)).srem(K.scheduledSubscriptions,id).srem(K.scheduledSubscriptionsByUser(r.user_id),id).srem(K.scheduledSubscriptionsByPeer(r.bot_id,r.peer_id),id).exec(); }
 
-export async function createScheduledTask(db: RedisStore, input: Omit<ScheduledTask,"id"|"created_at"|"updated_at"|"created_via">) { const row:ScheduledTask={...input,id:newId("schedtask"),created_via:"chat",created_at:nowIso(),updated_at:nowIso(),last_run_at:null,next_run_at:null,last_status:null,last_error:null}; await db.redis.multi().set(K.scheduledTask(row.id),json(row)).sadd(K.scheduledTasks,row.id).sadd(K.scheduledTasksByUser(row.user_id),row.id).sadd(K.scheduledTasksByPeer(row.bot_id,row.peer_id),row.id).exec(); return row; }
+export async function createScheduledTask(db: RedisStore, input: Omit<ScheduledTask,"id"|"created_at"|"updated_at"|"created_via">) { const row:ScheduledTask={...input,schedule_type:input.schedule_type||"cron",execute_at:input.execute_at||null,id:newId("schedtask"),created_via:"chat",created_at:nowIso(),updated_at:nowIso(),last_run_at:null,next_run_at:null,last_status:null,last_error:null}; await db.redis.multi().set(K.scheduledTask(row.id),json(row)).sadd(K.scheduledTasks,row.id).sadd(K.scheduledTasksByUser(row.user_id),row.id).sadd(K.scheduledTasksByPeer(row.bot_id,row.peer_id),row.id).exec(); return row; }
 export async function listScheduledTasks(db: RedisStore,userId?:string) { const ids=await db.redis.smembers(userId?K.scheduledTasksByUser(userId):K.scheduledTasks); const rows=await db.mgetJson<ScheduledTask>(ids.map(K.scheduledTask)); return rows.filter((x):x is ScheduledTask=>Boolean(x)); }
 export async function listPeerScheduledTasks(db: RedisStore,botId:string,peerId:string) { const ids=await db.redis.smembers(K.scheduledTasksByPeer(botId,peerId)); const rows=await db.mgetJson<ScheduledTask>(ids.map(K.scheduledTask)); return rows.filter((x):x is ScheduledTask=>Boolean(x)); }
 export async function getScheduledTask(db: RedisStore,id:string){return db.getJson<ScheduledTask>(K.scheduledTask(id));}

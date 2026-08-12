@@ -40,6 +40,7 @@ import {
   parseProactiveSkip,
   normalizeScheduledLayout,
   scheduledOutputIssues,
+  buildScheduledRepairUserMessage,
   splitScheduledBulletin,
   type PromptAttachment,
 } from "./prompt.js";
@@ -1179,9 +1180,13 @@ export class ChatService {
       ...usage,
       text: normalizeScheduledLayout(usage.text),
     };
+    const previewText = (text: string) =>
+      text.replace(/\s+/g, " ").trim().slice(0, 96);
     req.onProgress?.({
       stage: "generation",
-      message: `模型生成完成（${usage.text.length} 字符）`,
+      message: `模型生成完成（${usage.text.length} 字符${
+        usage.finishReason ? `，finish_reason=${usage.finishReason}` : ""
+      }）${usage.text ? `：${previewText(usage.text)}` : ""}`,
     });
     let issues = scheduledOutputIssues(req.prompt, usage.text);
     if (issues.length) {
@@ -1189,15 +1194,19 @@ export class ChatService {
         stage: "validation",
         message: `格式校验未通过，准备重试：${issues.join("；")}`,
       });
+      const repairOpts = { ...callOpts };
+      if (usage.finishReason === "length") {
+        repairOpts.maxTokens = Math.min(SCHEDULED_MAX_TOKENS * 2, 8192);
+      }
       const retryMessages = [
         ...messages,
         { role: "assistant" as const, content: usage.text },
         {
           role: "user" as const,
-          content: `上面的结果未满足定时任务要求：\n- ${issues.join("\n- ")}\n请严格按原任务修正，只输出最终消息。栏目之间必须换行，禁止整段挤成一行。`,
+          content: buildScheduledRepairUserMessage(issues, req.prompt),
         },
       ];
-      const retry = await client.chatWithUsage(retryMessages, callOpts);
+      const retry = await client.chatWithUsage(retryMessages, repairOpts);
       usage = {
         ...retry,
         text: normalizeScheduledLayout(retry.text),
@@ -1209,7 +1218,7 @@ export class ChatService {
       req.onProgress?.({
         stage: "validation",
         message: issues.length
-          ? `重试后仍未通过：${issues.join("；")}`
+          ? `重试后仍未通过（${usage.text.length} 字符）：${issues.join("；")}；预览：${previewText(usage.text)}`
           : "重试后格式校验通过",
       });
     } else {

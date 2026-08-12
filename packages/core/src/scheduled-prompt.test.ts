@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildScheduledMessages,
+  buildScheduledRepairUserMessage,
+  extractScheduledOutputSkeleton,
   normalizeScheduledLayout,
   scheduledOutputIssues,
   splitScheduledBulletin,
@@ -45,6 +47,65 @@ describe("scheduled prompt contract", () => {
     assert.match(String(messages[0]?.content), /27~34℃/);
     assert.match(String(messages[0]?.content), /上海今日天气/);
     assert.equal(messages[1]?.role, "user");
+    assert.match(String(messages[1]?.content), /硬性检查清单/);
+    assert.match(String(messages[1]?.content), /🌡️ 温度/);
+    assert.match(String(messages[1]?.content), /今日寄语/);
+  });
+
+  it("accepts compact emoji labels and builds a skeleton repair prompt", () => {
+    const loosePrompt = `🌤️ 今日天气
+🌡️ 温度
+☁️ 天气
+🌧️ 降雨
+💨 风力
+👕 穿衣
+☂️ 出行
+今日寄语
+保留换行`;
+    const output = `夜里好。
+
+🌤️ 深圳今日天气｜8月12日
+🌡温度：26℃ ～ 31℃
+☁天气：多云
+🌧降雨：阵雨
+💨风力：东南风 2～3 级
+
+👕穿衣：短袖
+☂出行：带伞
+
+「今日寄语：热气退一点也挺好。」
+
+先歇着吧。`;
+    assert.deepEqual(scheduledOutputIssues(loosePrompt, output), []);
+
+    const richPrompt = `${loosePrompt}
+
+【正确示例】
+早呀。
+
+🌤️ 深圳今日天气｜8月13日 周四
+🌡️ 温度：27℃ ～ 34℃
+☁️ 天气：多云
+🌧️ 降雨：午后可能有阵雨
+💨 风力：东南风 2～3 级
+
+👕 穿衣：短袖即可。
+☂️ 出行：记得带伞。
+
+「今日寄语：慢慢把今天过好就行。」
+
+好啦，先吃点东西。
+`;
+    const skeleton = extractScheduledOutputSkeleton(richPrompt);
+    assert.ok(skeleton);
+    assert.match(skeleton!, /🌤️/);
+    const repair = buildScheduledRepairUserMessage(
+      ["缺少栏目：☁️ 天气"],
+      richPrompt,
+    );
+    assert.match(repair, /整份重写/);
+    assert.match(repair, /🌤️ 深圳今日天气/);
+    assert.match(repair, /☁️ 天气/);
   });
 
   it("detects a weather greeting that ignored the requested structure", () => {

@@ -441,51 +441,138 @@ export function buildScheduledMessages(params: {
   ]
     .filter(Boolean)
     .join("\n\n");
+  const checklist = scheduledBulletinChecklist(params.scheduledPrompt);
+  const checklistBlock =
+    checklist.length >= 4
+      ? `\n\n硬性检查清单（缺一不可；每个栏目单独成行；禁止只写问候就结束）：\n${checklist
+          .map((label) => `- ${label}`)
+          .join("\n")}`
+      : "";
   const userInstruction = params.trustedInstruction
-    ? "请现在执行以上系统订阅任务，并直接输出最终发送给用户的内容。"
-    : `请现在执行这条已确认的定时任务，并直接输出最终发送给用户的内容：\n${params.scheduledPrompt.trim()}`;
+    ? `请现在执行以上系统订阅任务，并直接输出最终发送给用户的完整内容。${checklistBlock}`
+    : `请现在执行这条已确认的定时任务，并直接输出最终发送给用户的完整内容：\n${params.scheduledPrompt.trim()}${checklistBlock}`;
   return [
     { role: "system", content: system },
     { role: "user", content: userInstruction },
   ];
 }
 
+const SCHEDULED_LABEL_SPECS: Array<{
+  canonical: string;
+  promptNeedles: string[];
+  outputNeedles: string[];
+}> = [
+  { canonical: "🌤️", promptNeedles: ["🌤️"], outputNeedles: ["🌤️"] },
+  {
+    canonical: "🌡️ 温度",
+    promptNeedles: ["🌡️ 温度", "🌡 温度"],
+    outputNeedles: ["🌡️ 温度", "🌡 温度", "🌡️温度", "🌡温度"],
+  },
+  {
+    canonical: "☁️ 天气",
+    promptNeedles: ["☁️ 天气", "☁ 天气"],
+    outputNeedles: ["☁️ 天气", "☁ 天气", "☁️天气", "☁天气"],
+  },
+  {
+    canonical: "🌧️ 降雨",
+    promptNeedles: ["🌧️ 降雨", "🌧 降雨"],
+    outputNeedles: ["🌧️ 降雨", "🌧 降雨", "🌧️降雨", "🌧降雨"],
+  },
+  {
+    canonical: "💨 风力",
+    promptNeedles: ["💨 风力"],
+    outputNeedles: ["💨 风力", "💨风力"],
+  },
+  {
+    canonical: "👕 穿衣",
+    promptNeedles: ["👕 穿衣"],
+    outputNeedles: ["👕 穿衣", "👕穿衣"],
+  },
+  {
+    canonical: "☂️ 出行",
+    promptNeedles: ["☂️ 出行", "☂ 出行"],
+    outputNeedles: ["☂️ 出行", "☂ 出行", "☂️出行", "☂出行"],
+  },
+  {
+    canonical: "今日寄语",
+    promptNeedles: ["今日寄语"],
+    outputNeedles: ["今日寄语", "「今日寄语"],
+  },
+];
+
+/** Labels the template itself asks for — used in user checklist + validation. */
+export function scheduledBulletinChecklist(prompt: string): string[] {
+  return SCHEDULED_LABEL_SPECS.filter((spec) =>
+    spec.promptNeedles.some((needle) => prompt.includes(needle)),
+  ).map((spec) => spec.canonical);
+}
+
+function outputHasScheduledLabel(output: string, needles: string[]): boolean {
+  return needles.some((needle) => output.includes(needle));
+}
+
+function firstLabelIndex(output: string, needles: string[]): number {
+  let best = -1;
+  for (const needle of needles) {
+    const idx = output.indexOf(needle);
+    if (idx >= 0 && (best < 0 || idx < best)) best = idx;
+  }
+  return best;
+}
+
+/** Pull the template's own example / forced layout for repair retries. */
+export function extractScheduledOutputSkeleton(prompt: string): string | null {
+  const blocks = [
+    prompt.match(/【正确示例】\s*([\s\S]*?)(?=\n【|$)/u),
+    prompt.match(/【强制输出格式】\s*([\s\S]*?)(?=\n【|$)/u),
+  ];
+  for (const match of blocks) {
+    const body = match?.[1]?.trim();
+    if (body && body.length >= 40) return body.slice(0, 900);
+  }
+  return null;
+}
+
+/** Strong rewrite instruction after an incomplete / malformed first draft. */
+export function buildScheduledRepairUserMessage(
+  issues: string[],
+  scheduledPrompt: string,
+): string {
+  const checklist = scheduledBulletinChecklist(scheduledPrompt);
+  const skeleton = extractScheduledOutputSkeleton(scheduledPrompt);
+  return [
+    "上面的结果不完整或格式不对。请整份重写最终消息（不要续写、不要解释）。",
+    `问题：\n- ${issues.join("\n- ")}`,
+    checklist.length
+      ? `必须全部包含：\n${checklist.map((label) => `- ${label}`).join("\n")}`
+      : "",
+    skeleton
+      ? `结构必须贴近下列骨架（可改文案与天气数据，不可删栏目，不可并成一段）：\n${skeleton}`
+      : "每个天气栏目必须单独成行，栏目之间保留空行。",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 /** Validate only requirements explicitly present in a scheduled template. */
 export function scheduledOutputIssues(prompt: string, output: string): string[] {
   const issues: string[] = [];
-  const requiredLabels = [
-    "🌤️",
-    "🌡️ 温度",
-    "☁️ 天气",
-    "🌧️ 降雨",
-    "💨 风力",
-    "👕 穿衣",
-    "☂️ 出行",
-    "今日寄语",
-  ];
-  for (const label of requiredLabels) {
-    if (prompt.includes(label) && !output.includes(label)) {
-      issues.push(`缺少栏目：${label}`);
+  for (const spec of SCHEDULED_LABEL_SPECS) {
+    if (!spec.promptNeedles.some((needle) => prompt.includes(needle))) continue;
+    if (!outputHasScheduledLabel(output, spec.outputNeedles)) {
+      issues.push(`缺少栏目：${spec.canonical}`);
     }
   }
   if (/保留换行/.test(prompt) && !output.includes("\n")) {
     issues.push("没有保留换行");
   }
   // Weather / bulletin templates: section markers must start their own line.
-  for (const label of [
-    "🌤️",
-    "🌡️",
-    "☁️",
-    "🌧️",
-    "💨",
-    "👕",
-    "☂️",
-    "今日寄语",
-  ]) {
-    if (!prompt.includes(label) || !output.includes(label)) continue;
-    const idx = output.indexOf(label);
+  for (const spec of SCHEDULED_LABEL_SPECS) {
+    if (!spec.promptNeedles.some((needle) => prompt.includes(needle))) continue;
+    if (!outputHasScheduledLabel(output, spec.outputNeedles)) continue;
+    const idx = firstLabelIndex(output, spec.outputNeedles);
     if (idx > 0 && output[idx - 1] !== "\n") {
-      issues.push(`栏目「${label}」前缺少换行`);
+      issues.push(`栏目「${spec.canonical}」前缺少换行`);
     }
   }
   const lengthRange = scheduledOverallLengthRange(prompt);

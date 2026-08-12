@@ -15,6 +15,7 @@ export {
   buildProactiveInstruction,
   buildProactiveMessages,
   buildUserContent,
+  buildScheduledRepairUserMessage,
   describeAttachments,
   BOT_NAME_VARS,
   normalizeScheduledLayout,

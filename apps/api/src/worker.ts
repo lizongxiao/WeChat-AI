@@ -2285,6 +2285,7 @@ export class BotWorkerManager {
         job.peerId,
         job.contextToken,
       );
+      client.markContextFresh(job.peerId);
     } catch {
       /* non-fatal */
     }

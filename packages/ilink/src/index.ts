@@ -3,6 +3,7 @@ export {
   ILinkError,
   extractText,
   isMediaOnlyWithoutText,
+  isStaleSessionError,
   isUserInbound,
 } from "./client.js";
 export {

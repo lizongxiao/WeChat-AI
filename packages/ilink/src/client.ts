@@ -54,6 +54,21 @@ export class ILinkError extends Error {
   }
 }
 
+/**
+ * iLink overloads ret=-2: stale context_token ("prepare failed" / "unknown
+ * error"), and occasionally a real rate limit. Tokenless sendmessage is the
+ * established recovery for proactive / cron pushes when the session token
+ * has gone stale (errcode -14 is the documented sibling).
+ */
+export function isStaleSessionError(err: unknown): boolean {
+  if (!(err instanceof ILinkError)) return false;
+  if (err.ret === -14 || err.errcode === -14) return true;
+  if (err.ret !== -2 && err.errcode !== -2) return false;
+  const msg = (err.message || "").toLowerCase();
+  if (/frequen|too many|rate limit/.test(msg)) return false;
+  return true;
+}
+
 export class ILinkClient {
   private baseUrl: string;
   private botToken?: string;
@@ -65,6 +80,8 @@ export class ILinkClient {
   private typingTickets = new Map<string, TypingTicketEntry>();
   /** Collapses the burst of concurrent typing calls one reply produces */
   private typingTicketInflight = new Map<string, Promise<string | null>>();
+  /** Peers whose context_token was rejected; subsequent sends skip it. */
+  private staleContextPeers = new Set<string>();
   private typingTicketTtlMs: number;
   private typingTicketMaxEntries: number;
   private mediaMaxBytes: number;
@@ -146,6 +163,45 @@ export class ILinkClient {
     );
   }
 
+  /** Inbound message refreshed this peer's session; prefer context_token again. */
+  markContextFresh(toUserId: string): void {
+    const id = toUserId?.trim();
+    if (id) this.staleContextPeers.delete(id);
+  }
+
+  /**
+   * POST /sendmessage. If context_token is stale (ret=-2 / -14), retry once
+   * without it — iLink accepts tokenless sends as a degraded fallback.
+   */
+  private async postSendMessage<T>(body: {
+    msg: Record<string, unknown>;
+    [key: string]: unknown;
+  }): Promise<T> {
+    const peer = String(body.msg.to_user_id ?? "").trim();
+    const token = String(body.msg.context_token ?? "").trim();
+    const skipToken = Boolean(peer && this.staleContextPeers.has(peer));
+    const first = skipToken
+      ? { ...body, msg: { ...body.msg, context_token: "" } }
+      : body;
+    try {
+      return await this.postJson<T>("/ilink/bot/sendmessage", first);
+    } catch (err) {
+      if (skipToken || !token || !isStaleSessionError(err)) throw err;
+      const retried = await this.postJson<T>("/ilink/bot/sendmessage", {
+        ...body,
+        msg: { ...body.msg, context_token: "" },
+      });
+      if (peer) {
+        this.staleContextPeers.add(peer);
+        if (this.staleContextPeers.size > 2048) {
+          const firstKey = this.staleContextPeers.values().next().value;
+          if (firstKey) this.staleContextPeers.delete(firstKey);
+        }
+      }
+      return retried;
+    }
+  }
+
   /** Send text reply; context_token from inbound message is required. */
   async sendText(params: {
     toUserId: string;
@@ -158,7 +214,7 @@ export class ILinkClient {
       params.clientId ??
       `wechat-ai-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-    return this.postJson<SendMessageResponse>("/ilink/bot/sendmessage", {
+    return this.postSendMessage<SendMessageResponse>({
       msg: {
         from_user_id: "",
         to_user_id: params.toUserId,
@@ -527,7 +583,7 @@ export class ILinkClient {
       params.clientId ??
       `wechat-ai-img-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-    return this.postJson<SendMessageResponse>("/ilink/bot/sendmessage", {
+    return this.postSendMessage<SendMessageResponse>({
       msg: {
         from_user_id: "",
         to_user_id: params.toUserId,
@@ -598,7 +654,7 @@ export class ILinkClient {
         .toString(36)
         .slice(2, 10)}`;
 
-    return this.postJson<SendMessageResponse>("/ilink/bot/sendmessage", {
+    return this.postSendMessage<SendMessageResponse>({
       msg: {
         from_user_id: "",
         to_user_id: params.toUserId,

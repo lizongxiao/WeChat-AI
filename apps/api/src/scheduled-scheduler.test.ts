@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { cronMatches, nextCronRun, scheduledPreviewTime, scheduledTestLockSource } from "./scheduled-scheduler.js";
+import {
+  cronMatches,
+  nextCronRun,
+  resolveScheduledParams,
+  scheduledPreviewTime,
+  scheduledTestLockSource,
+} from "./scheduled-scheduler.js";
 
 describe("scheduled cron matching", () => {
   it("uses the task timezone, not the worker timezone", () => {
@@ -42,5 +48,33 @@ describe("scheduled cron matching", () => {
       ),
       "2026-08-13T01:00:00.000Z",
     );
+  });
+
+  it("fills blank subscription params with schema and built-in defaults", () => {
+    const empty = resolveScheduledParams(
+      {},
+      {
+        required: ["location"],
+        properties: { location: { type: "string" } },
+      },
+    );
+    assert.equal(empty.params.location, "深圳");
+    assert.deepEqual(empty.defaultsApplied, ["location"]);
+
+    const schemaDefault = resolveScheduledParams(
+      { location: "  " },
+      {
+        required: ["location"],
+        properties: { location: { type: "string", default: "广州" } },
+      },
+    );
+    assert.equal(schemaDefault.params.location, "广州");
+
+    const kept = resolveScheduledParams({ location: "上海" }, {
+      required: ["location"],
+      properties: { location: { type: "string", default: "广州" } },
+    });
+    assert.equal(kept.params.location, "上海");
+    assert.deepEqual(kept.defaultsApplied, []);
   });
 });

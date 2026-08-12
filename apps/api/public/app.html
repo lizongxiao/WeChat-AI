@@ -2140,6 +2140,12 @@
       gap: 12px;
       flex-shrink: 0;
     }
+    .peer-history-head-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
     .peer-history-head h3 { margin-bottom: 4px; }
     .peer-history-sub {
       margin: 0;
@@ -3322,7 +3328,12 @@
           <h3 id="peerHistoryTitle">对话历史</h3>
           <p class="peer-history-sub" id="peerHistorySub"></p>
         </div>
-        <button class="btn btn-ghost btn-sm" type="button" id="peerHistoryClose" aria-label="关闭"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
+        <div class="peer-history-head-actions">
+          <button class="btn btn-secondary btn-sm" type="button" id="peerHistoryCopy" disabled title="复制全部对话">
+            <i class="bi bi-clipboard" aria-hidden="true"></i>复制全部
+          </button>
+          <button class="btn btn-ghost btn-sm" type="button" id="peerHistoryClose" aria-label="关闭"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
+        </div>
       </div>
       <div class="peer-history-log" id="peerHistoryLog">
         <p class="peer-history-empty">正在加载…</p>
@@ -4615,8 +4626,16 @@
       const key = `${p.bot_account_id}|${p.peer_id}`;
       return `<select class="persona-select" data-asg="${esc(key)}" title="${esc(p.personaName || "选择人设")}">${peerPersonaOpts(p)}</select>`;
     }
+    let peerHistoryCopyText = "";
+    function setPeerHistoryCopyEnabled(enabled) {
+      const btn = $("peerHistoryCopy");
+      if (!btn) return;
+      btn.disabled = !enabled;
+    }
     function closePeerHistory() {
       $("peerHistoryModal")?.classList.remove("show");
+      peerHistoryCopyText = "";
+      setPeerHistoryCopyEnabled(false);
     }
     function formatPeerHistoryTime(value) {
       const date = new Date(value);
@@ -4630,6 +4649,31 @@
         hour12: false,
       });
     }
+    function formatPeerHistoryPlainText(messages, peerName) {
+      const lines = [`对话历史 · ${peerName}`, ""];
+      for (const message of messages) {
+        const role = message.role === "user" ? "微信用户" : "机器人";
+        const time = formatPeerHistoryTime(message.createdAt);
+        const head = time ? `[${role} · ${time}]` : `[${role}]`;
+        lines.push(head);
+        lines.push(String(message.content ?? ""));
+        lines.push("");
+      }
+      return lines.join("\n").trimEnd();
+    }
+    async function copyPeerHistory() {
+      const text = peerHistoryCopyText.trim();
+      if (!text) {
+        toast("暂无可复制的对话", true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("已复制全部对话");
+      } catch {
+        toast("复制失败", true);
+      }
+    }
     async function openPeerHistory(botAccountId, peerId) {
       const modal = $("peerHistoryModal");
       const log = $("peerHistoryLog");
@@ -4638,6 +4682,8 @@
         (item) => item.bot_account_id === botAccountId && item.peer_id === peerId,
       );
       const peerName = peer?.remark || peer?.display_name || peerId;
+      peerHistoryCopyText = "";
+      setPeerHistoryCopyEnabled(false);
       sub.textContent = `${peerName} · 最近 200 条`;
       log.innerHTML = '<p class="peer-history-empty">正在加载…</p>';
       modal.classList.add("show");
@@ -4656,6 +4702,8 @@
           log.innerHTML = '<p class="peer-history-empty">暂无对话记录</p>';
           return;
         }
+        peerHistoryCopyText = formatPeerHistoryPlainText(messages, peerName);
+        setPeerHistoryCopyEnabled(true);
         log.innerHTML = messages
           .map((message) => {
             const role = message.role === "user" ? "user" : "assistant";
@@ -4669,6 +4717,8 @@
           .join("");
         log.scrollTop = log.scrollHeight;
       } catch (e) {
+        peerHistoryCopyText = "";
+        setPeerHistoryCopyEnabled(false);
         log.innerHTML = `<p class="peer-history-empty">${esc(e.message || "对话历史加载失败")}</p>`;
       }
     }
@@ -4970,6 +5020,9 @@
       });
     }
     $("peerHistoryClose")?.addEventListener("click", closePeerHistory);
+    $("peerHistoryCopy")?.addEventListener("click", () => {
+      void copyPeerHistory();
+    });
     $("peerHistoryModal")?.addEventListener("click", (event) => {
       if (event.target === $("peerHistoryModal")) closePeerHistory();
     });

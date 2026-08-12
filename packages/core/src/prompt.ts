@@ -469,16 +469,41 @@ export function scheduledOutputIssues(prompt: string, output: string): string[] 
   if (/保留换行/.test(prompt) && !output.includes("\n")) {
     issues.push("没有保留换行");
   }
-  const range = prompt.match(/(\d+)\s*[~～-]\s*(\d+)\s*字/);
-  if (range) {
-    const min = Number(range[1]);
-    const max = Number(range[2]);
+  const lengthRange = scheduledOverallLengthRange(prompt);
+  if (lengthRange) {
     const length = [...output.trim()].length;
-    if (length < min || length > max) {
-      issues.push(`字数为 ${length}，要求 ${min}~${max} 字`);
+    if (length < lengthRange.min || length > lengthRange.max) {
+      issues.push(
+        `字数为 ${length}，要求 ${lengthRange.min}~${lengthRange.max} 字`,
+      );
     }
   }
   return issues;
+}
+
+/**
+ * Prefer whole-message bounds ("整体控制在 150~300 字").
+ * Subsection bounds like "今日寄语：15~40 字" must not reject a full bulletin.
+ */
+export function scheduledOverallLengthRange(
+  prompt: string,
+): { min: number; max: number } | null {
+  const overall = prompt.match(
+    /(?:整体|全文|总共|合计|篇幅|全文长度|字数(?:控制在|要求|限制)?|控制在)[^\n\d]{0,16}(\d+)\s*[~～\-至到]\s*(\d+)\s*字/u,
+  );
+  if (overall) {
+    return { min: Number(overall[1]), max: Number(overall[2]) };
+  }
+
+  const matches = [...prompt.matchAll(/(\d+)\s*[~～\-至到]\s*(\d+)\s*字/gu)];
+  if (matches.length !== 1) return null;
+
+  const only = matches[0]!;
+  const idx = only.index ?? 0;
+  const before = prompt.slice(Math.max(0, idx - 24), idx);
+  // A lone range under a subsection label is not a whole-message constraint.
+  if (/寄语|标题|开场|结尾|问候语|短句|一句话/.test(before)) return null;
+  return { min: Number(only[1]), max: Number(only[2]) };
 }
 
 /** Proactive outreach: no new user message; model may skip. */

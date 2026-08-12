@@ -21,7 +21,99 @@ export function scheduledPreviewTime(schedule:string, timezone:string, now=new D
 function minuteKey(d:Date){return d.toISOString().slice(0,16);}
 /** Manual smoke tests must not share the production schedule's dedupe key. */
 export function scheduledTestLockSource(source:"task"|"subscription",runId?:string){return `${source}:test${runId?`:${runId}`:""}`;}
-function interpolate(template:string, params:Record<string,unknown>) { return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g,(_,k)=>typeof params[k]==="string"||typeof params[k]==="number"?String(params[k]):""); }
+
+/** Built-in fallbacks when subscription params are blank (common in smoke tests). */
+export const SCHEDULED_PARAM_DEFAULTS: Record<string, string> = {
+  location: "深圳",
+  city: "深圳",
+  place: "深圳",
+  地区: "深圳",
+  城市: "深圳",
+};
+
+function schemaParamDefault(
+  schema: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+    return undefined;
+  }
+  const rule = (properties as Record<string, Record<string, unknown>>)[key];
+  if (!rule) return undefined;
+  if (typeof rule.default === "string" && rule.default.trim()) {
+    return rule.default.trim();
+  }
+  if (typeof rule.default === "number" && Number.isFinite(rule.default)) {
+    return String(rule.default);
+  }
+  return undefined;
+}
+
+/**
+ * Fill empty subscription params from schema defaults, then built-in defaults.
+ * Keeps smoke tests and partial subscriptions from failing on blank {{location}}.
+ */
+export function resolveScheduledParams(
+  params: Record<string, unknown> = {},
+  schema?: Record<string, unknown>,
+): { params: Record<string, unknown>; defaultsApplied: string[] } {
+  const out: Record<string, unknown> = { ...params };
+  const defaultsApplied: string[] = [];
+  const required = Array.isArray(schema?.required)
+    ? schema.required.filter((x): x is string => typeof x === "string")
+    : [];
+  const propertyKeys =
+    schema?.properties &&
+    typeof schema.properties === "object" &&
+    !Array.isArray(schema.properties)
+      ? Object.keys(schema.properties as object)
+      : [];
+  const keys = new Set<string>([
+    ...Object.keys(out),
+    ...required,
+    ...propertyKeys,
+  ]);
+  for (const key of keys) {
+    const cur = out[key];
+    const empty =
+      cur === undefined ||
+      cur === null ||
+      (typeof cur === "string" && !cur.trim());
+    if (!empty) {
+      if (typeof cur === "string") out[key] = cur.trim();
+      continue;
+    }
+    const fromSchema = schemaParamDefault(schema, key);
+    if (fromSchema !== undefined) {
+      out[key] = fromSchema;
+      defaultsApplied.push(key);
+      continue;
+    }
+    const builtin = SCHEDULED_PARAM_DEFAULTS[key];
+    if (builtin) {
+      out[key] = builtin;
+      defaultsApplied.push(key);
+    }
+  }
+  return { params: out, defaultsApplied };
+}
+
+function interpolate(template:string, params:Record<string,unknown>) {
+  return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, k: string) => {
+    const value = params[k];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    return SCHEDULED_PARAM_DEFAULTS[k] ?? "";
+  });
+}
+function locationHintFromParams(params:Record<string,unknown>= {}) {
+  for (const key of ["location", "city", "place", "地区", "城市"]) {
+    const value = params[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return SCHEDULED_PARAM_DEFAULTS.location;
+}
 
 export class ScheduledScheduler {
   private stopped=true; private timer:ReturnType<typeof setTimeout>|null=null; private running=false;
@@ -42,15 +134,26 @@ export class ScheduledScheduler {
     for(const sub of subs){
       onProgress?.({level:"info",stage:"subscriber",message:"开始处理订阅用户",peerId:sub.peer_id});
       if(!(await isServiceOpenToPersona(this.opts.db,serviceId,sub.persona_id))){skipped++;details.push({peerId:sub.peer_id,reason:"persona_not_open"});onProgress?.({level:"warn",stage:"subscriber",message:"Persona 未开放此服务，已跳过",peerId:sub.peer_id});continue;}
-      const prompt=interpolate(service.prompt_template,sub.params);
+      const resolved=resolveScheduledParams(sub.params,service.params_schema);
+      if(resolved.defaultsApplied.length){
+        onProgress?.({
+          level:"warn",
+          stage:"prepare",
+          message:`参数缺失，已用默认值：${resolved.defaultsApplied
+            .map((key)=>`${key}=${String(resolved.params[key])}`)
+            .join("，")}`,
+          peerId:sub.peer_id,
+        });
+      }
+      const prompt=interpolate(service.prompt_template,resolved.params);
       const executionTime=new Date(scheduledPreviewTime(service.schedule,service.timezone,now));
-      const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,scheduledTestLockSource("subscription",runId),executionTime,service.timezone,event=>onProgress?.({...event,peerId:sub.peer_id}));
+      const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,scheduledTestLockSource("subscription",runId),executionTime,service.timezone,event=>onProgress?.({...event,peerId:sub.peer_id}),locationHintFromParams(resolved.params));
       if(result.sent){sent++;onProgress?.({level:"info",stage:"complete",message:"发送成功",peerId:sub.peer_id});}else {skipped++;details.push({peerId:sub.peer_id,reason:result.reason||"unknown"});onProgress?.({level:"error",stage:"complete",message:`发送失败：${result.reason||"unknown"}`,peerId:sub.peer_id});}
     }
     onProgress?.({level:skipped?"warn":"info",stage:"summary",message:`测试结束：发送 ${sent}，跳过 ${skipped}`});
     return {sent,skipped,matched:subs.length,details};
   }
   private arm(ms:number){if(this.stopped)return;this.timer=setTimeout(()=>void this.tick().catch(e=>this.opts.log?.(`[schedule] tick error ${e instanceof Error?e.message:String(e)}`)).finally(()=>this.arm(this.opts.intervalSec*1000)),ms);}
-  async tick(now=new Date()){if(this.stopped||this.running)return {sent:0,skipped:0};this.running=true;let sent=0,skipped=0;try { const [tasks,subs]=await Promise.all([listScheduledTasks(this.opts.db),listUserSubscriptions(this.opts.db)]); for(const task of tasks){const oneTime=task.schedule_type==="one_time";const executeAt=task.execute_at?new Date(task.execute_at):null;const due=task.enabled&&(oneTime?Boolean(executeAt&&executeAt.getTime()<=now.getTime()&&!task.last_run_at):cronMatches(task.schedule,now,task.timezone));if(!oneTime&&(!task.next_run_at||due))await updateScheduledTask(this.opts.db,task.id,{next_run_at:nextCronRun(task.schedule,task.timezone,now)});if(!due)continue; const result=await this.run("task",task.id,task.bot_id,task.peer_id,task.persona_id,task.prompt,Boolean(task.web_search_enabled),now,"task",now,task.timezone);if(result.sent){sent++;if(oneTime)await updateScheduledTask(this.opts.db,task.id,{enabled:0,next_run_at:null});}else skipped++;} for(const sub of subs){if(!(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub)))continue;const service=await getSystemSubscriptionService(this.opts.db,sub.service_id);if(!service?.enabled||!(await isServiceOpenToPersona(this.opts.db,service.id,sub.persona_id)))continue;const due=cronMatches(service.schedule,now,service.timezone);if(!sub.next_run_at||due)await updateUserSubscription(this.opts.db,sub.id,{next_run_at:nextCronRun(service.schedule,service.timezone,now)});if(!due)continue; const prompt=interpolate(service.prompt_template,sub.params);if((await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,"subscription",now,service.timezone)).sent)sent++;else skipped++;} } finally {this.running=false;} return {sent,skipped};}
-  private async run(source:"task"|"subscription",id:string,botId:string,peerId:string,personaId:string,prompt:string,web:boolean,now:Date,lockSource:string=source,executionTime:Date=now,timeZone="Asia/Shanghai",onProgress?:ScheduledTestProgressHandler):Promise<{sent:true}|{sent:false;reason:string}>{const key=minuteKey(now);onProgress?.({level:"info",stage:"lock",message:"正在获取执行锁"});if(!(await tryAcquireScheduledExecutionLock(this.opts.db,lockSource,id,key,this.opts.lockTtlSec))){onProgress?.({level:"warn",stage:"lock",message:"本分钟已有相同执行，去重锁拒绝"});return {sent:false,reason:"duplicate_execution_lock"};}try{onProgress?.({level:"info",stage:"context",message:"正在读取会话上下文"});const tok=await getContextToken(this.opts.db,botId,peerId);if(!tok)throw new Error("no_context_token");const r=await this.opts.chat.handleScheduled({botAccountId:botId,peerId,contextToken:tok,personaId,prompt,webSearchEnabled:web,source,executionTime:executionTime.toISOString(),timeZone,onProgress:event=>onProgress?.({level:"info",stage:event.stage,message:event.message})});if(r.kind!=="reply"||!r.text)throw new Error(r.skipReason||r.kind);onProgress?.({level:"info",stage:"delivery",message:"内容生成成功，正在发送到微信"});const out=await this.opts.sendReply(botId,peerId,r);if(!out.ok)throw new Error(out.reason||"send_failed");const patch={last_run_at:now.toISOString(),last_status:"sent",last_error:null}; source==="task"?await updateScheduledTask(this.opts.db,id,patch):await updateUserSubscription(this.opts.db,id,patch);return {sent:true};}catch(e){const reason=e instanceof Error?e.message:String(e);onProgress?.({level:"error",stage:"error",message:reason});const patch={last_run_at:now.toISOString(),last_status:"error",last_error:reason};source==="task"?await updateScheduledTask(this.opts.db,id,patch).catch(()=>undefined):await updateUserSubscription(this.opts.db,id,patch).catch(()=>undefined);this.opts.log?.(`[schedule] ${source}=${id} failed`,e);return {sent:false,reason};}}
+  async tick(now=new Date()){if(this.stopped||this.running)return {sent:0,skipped:0};this.running=true;let sent=0,skipped=0;try { const [tasks,subs]=await Promise.all([listScheduledTasks(this.opts.db),listUserSubscriptions(this.opts.db)]); for(const task of tasks){const oneTime=task.schedule_type==="one_time";const executeAt=task.execute_at?new Date(task.execute_at):null;const due=task.enabled&&(oneTime?Boolean(executeAt&&executeAt.getTime()<=now.getTime()&&!task.last_run_at):cronMatches(task.schedule,now,task.timezone));if(!oneTime&&(!task.next_run_at||due))await updateScheduledTask(this.opts.db,task.id,{next_run_at:nextCronRun(task.schedule,task.timezone,now)});if(!due)continue; const result=await this.run("task",task.id,task.bot_id,task.peer_id,task.persona_id,task.prompt,Boolean(task.web_search_enabled),now,"task",now,task.timezone);if(result.sent){sent++;if(oneTime)await updateScheduledTask(this.opts.db,task.id,{enabled:0,next_run_at:null});}else skipped++;} for(const sub of subs){if(!(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub)))continue;const service=await getSystemSubscriptionService(this.opts.db,sub.service_id);if(!service?.enabled||!(await isServiceOpenToPersona(this.opts.db,service.id,sub.persona_id)))continue;const due=cronMatches(service.schedule,now,service.timezone);if(!sub.next_run_at||due)await updateUserSubscription(this.opts.db,sub.id,{next_run_at:nextCronRun(service.schedule,service.timezone,now)});if(!due)continue; const resolved=resolveScheduledParams(sub.params,service.params_schema); const prompt=interpolate(service.prompt_template,resolved.params);if((await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,"subscription",now,service.timezone,undefined,locationHintFromParams(resolved.params))).sent)sent++;else skipped++;} } finally {this.running=false;} return {sent,skipped};}
+  private async run(source:"task"|"subscription",id:string,botId:string,peerId:string,personaId:string,prompt:string,web:boolean,now:Date,lockSource:string=source,executionTime:Date=now,timeZone="Asia/Shanghai",onProgress?:ScheduledTestProgressHandler,locationHint?:string):Promise<{sent:true}|{sent:false;reason:string}>{const key=minuteKey(now);onProgress?.({level:"info",stage:"lock",message:"正在获取执行锁"});if(!(await tryAcquireScheduledExecutionLock(this.opts.db,lockSource,id,key,this.opts.lockTtlSec))){onProgress?.({level:"warn",stage:"lock",message:"本分钟已有相同执行，去重锁拒绝"});return {sent:false,reason:"duplicate_execution_lock"};}try{onProgress?.({level:"info",stage:"context",message:"正在读取会话上下文"});const tok=await getContextToken(this.opts.db,botId,peerId);if(!tok)throw new Error("no_context_token");const r=await this.opts.chat.handleScheduled({botAccountId:botId,peerId,contextToken:tok,personaId,prompt,webSearchEnabled:web,source,executionTime:executionTime.toISOString(),timeZone,locationHint,onProgress:event=>onProgress?.({level:"info",stage:event.stage,message:event.message})});if(r.kind!=="reply"||!r.text)throw new Error(r.skipReason||r.kind);onProgress?.({level:"info",stage:"delivery",message:"内容生成成功，正在发送到微信"});const out=await this.opts.sendReply(botId,peerId,r);if(!out.ok)throw new Error(out.reason||"send_failed");const patch={last_run_at:now.toISOString(),last_status:"sent",last_error:null}; source==="task"?await updateScheduledTask(this.opts.db,id,patch):await updateUserSubscription(this.opts.db,id,patch);return {sent:true};}catch(e){const reason=e instanceof Error?e.message:String(e);onProgress?.({level:"error",stage:"error",message:reason});const patch={last_run_at:now.toISOString(),last_status:"error",last_error:reason};source==="task"?await updateScheduledTask(this.opts.db,id,patch).catch(()=>undefined):await updateUserSubscription(this.opts.db,id,patch).catch(()=>undefined);this.opts.log?.(`[schedule] ${source}=${id} failed`,e);return {sent:false,reason};}}
 }

@@ -153,6 +153,8 @@ export interface ScheduledChatRequest {
   /** Logical schedule time, which can differ from wall time during a preview. */
   executionTime?: string;
   timeZone?: string;
+  /** Preferred weather city from subscription params (e.g. location / city). */
+  locationHint?: string;
   onProgress?: (event: {
     stage: "web_search" | "generation" | "validation";
     message: string;
@@ -177,6 +179,8 @@ const WEATHER_LOCATION_NOISE = new Set([
   "它",
   "咱们",
   "大家",
+  "用户",
+  "给用户",
   "今天",
   "今日",
   "明天",
@@ -196,14 +200,28 @@ function normalizeWeatherLocation(value: string): string {
 
 function isUsableWeatherLocation(value: string): boolean {
   const loc = normalizeWeatherLocation(value);
-  if (loc.length < 2) return false;
+  if (loc.length < 2 || loc.length > 20) return false;
   if (WEATHER_LOCATION_NOISE.has(loc)) return false;
   if (/^[的了着吗呢吧啊呀嘛]+$/u.test(loc)) return false;
+  // Instructional prose from templates, e.g. “发送给用户的天气”.
+  if (
+    /用户|发送|推送|主动|问候|消息|订阅|查询|播报|提醒|通知|模板|任务|晨间|早晨|每天|每日/.test(
+      loc,
+    )
+  ) {
+    return false;
+  }
   return true;
 }
 
 /** Prefer explicit city names; never capture the particle in “今天的天气”. */
-export function extractWeatherLocation(prompt: string): string {
+export function extractWeatherLocation(
+  prompt: string,
+  locationHint?: string,
+): string {
+  const hint = normalizeWeatherLocation(locationHint ?? "");
+  if (isUsableWeatherLocation(hint)) return hint;
+
   const candidates = [
     prompt.match(/🌤️\s*([^\n｜|]{1,40}?)\s*今日天气/u)?.[1],
     prompt.match(
@@ -223,11 +241,19 @@ export function extractWeatherLocation(prompt: string): string {
   return "";
 }
 
+/** Default city when weather location cannot be resolved from params/prompt. */
+export const DEFAULT_WEATHER_LOCATION = "深圳";
+
 export function scheduledSearchQuery(
   prompt: string,
   executionTime: string,
   timeZone: string,
-): { query: string; location?: string; missingLocation?: boolean } {
+  locationHint?: string,
+): {
+  query: string;
+  location?: string;
+  usedDefaultLocation?: boolean;
+} {
   const date = new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
@@ -235,19 +261,15 @@ export function scheduledSearchQuery(
     day: "2-digit",
   }).format(new Date(executionTime));
   if (/天气/.test(prompt)) {
-    const location = extractWeatherLocation(prompt);
-    if (!location) {
-      return {
-        query: `${date} 天气 最低温 最高温 降雨 风向 风力`,
-        missingLocation: true,
-      };
-    }
+    const resolved = extractWeatherLocation(prompt, locationHint);
+    const location = resolved || DEFAULT_WEATHER_LOCATION;
     return {
       query: `${date} ${location} 天气 最低温 最高温 降雨 风向 风力`.replace(
         /\s+/g,
         " ",
       ),
       location,
+      ...(resolved ? {} : { usedDefaultLocation: true as const }),
     };
   }
   const task = prompt.replace(/\s+/g, " ").trim().slice(0, 240);
@@ -1070,18 +1092,18 @@ export class ChatService {
     }
     let webSearchContext: string | undefined;
     if (req.webSearchEnabled) {
-      const planned = scheduledSearchQuery(req.prompt, executionTime, timeZone);
-      if (planned.missingLocation) {
-        req.onProgress?.({
-          stage: "web_search",
-          message: "天气任务缺少可用地点，已中止联网查询",
-        });
-        return { kind: "skip", skipReason: "web_search_failed:missing_location" };
-      }
+      const planned = scheduledSearchQuery(
+        req.prompt,
+        executionTime,
+        timeZone,
+        req.locationHint,
+      );
       const query = planned.query;
       req.onProgress?.({
         stage: "web_search",
-        message: `开始联网查询：${query}`,
+        message: planned.usedDefaultLocation
+          ? `地点缺失，使用默认「${planned.location}」；开始联网查询：${query}`
+          : `开始联网查询：${query}`,
       });
       try {
         const rawContext = this.opts.webSearchRunner

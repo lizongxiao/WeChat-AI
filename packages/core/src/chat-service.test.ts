@@ -376,13 +376,14 @@ describe("ChatService multi-user isolation (Redis)", () => {
     await approvePeer(db,botId,peerId);
     await setAssignment(db,botId,peerId,cat!.id);
     let searchQuery="";
+    let fallbackQuery="";
     const progress:string[]=[];
     const fake=new FakeLlm("今天多云 28~34℃");
     const chat=new ChatService(db,asLlm(fake),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,webSearchRunner:async(query)=>{searchQuery=query;return "上海：多云，28~34℃，东南风";}});
     const result=await chat.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天上海的天气",webSearchEnabled:true,source:"subscription",onProgress:event=>progress.push(event.stage)});
     const failed=new ChatService(db,asLlm(new FakeLlm("不应发送")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,webSearchRunner:async()=>{throw new Error("search down");}});
     const blocked=await failed.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"播报今天上海的天气",webSearchEnabled:true,source:"subscription"});
-    const noLocation=new ChatService(db,asLlm(new FakeLlm("不应发送")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,webSearchRunner:async()=>"x"});
+    const noLocation=new ChatService(db,asLlm(new FakeLlm("深圳多云")),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false,webSearchEnabled:true,webSearchRunner:async(query)=>{fallbackQuery=query;return "深圳：多云";}});
     const missing=await noLocation.handleScheduled({botAccountId:botId,peerId,contextToken:"tok",personaId:cat!.id,prompt:"今天的天气",webSearchEnabled:true,source:"subscription"});
     await db.close();
     assert.equal(result.kind,"reply");
@@ -394,7 +395,7 @@ describe("ChatService multi-user isolation (Redis)", () => {
     assert.deepEqual(progress,["web_search","web_search","generation","generation","validation"]);
     assert.equal(blocked.kind,"skip");
     assert.match(blocked.skipReason??"",/^web_search_failed:/);
-    assert.equal(missing.kind,"skip");
-    assert.equal(missing.skipReason,"web_search_failed:missing_location");
+    assert.equal(missing.kind,"reply");
+    assert.match(fallbackQuery,/深圳.*天气/);
   });
 });

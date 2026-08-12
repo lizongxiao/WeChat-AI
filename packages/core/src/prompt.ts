@@ -482,17 +482,25 @@ export function scheduledOutputIssues(prompt: string, output: string): string[] 
 }
 
 /**
- * Prefer whole-message bounds ("整体控制在 150~300 字").
- * Subsection bounds like "今日寄语：15~40 字" must not reject a full bulletin.
+ * Prefer whole-message bounds ("整体控制在 300～500 字").
+ * Subsection bounds like "控制在 15~40 字" under 今日寄语 must not reject a full bulletin.
  */
 export function scheduledOverallLengthRange(
   prompt: string,
 ): { min: number; max: number } | null {
+  // Do NOT treat bare「控制在」as overall — that phrase also appears under 寄语.
   const overall = prompt.match(
-    /(?:整体|全文|总共|合计|篇幅|全文长度|字数(?:控制在|要求|限制)?|控制在)[^\n\d]{0,16}(\d+)\s*[~～\-至到]\s*(\d+)\s*字/u,
+    /(?:整体|全文|总共|合计|篇幅|全文长度)[^\n\d]{0,24}(\d+)\s*[~～\-至到]\s*(\d+)\s*字/u,
   );
   if (overall) {
     return { min: Number(overall[1]), max: Number(overall[2]) };
+  }
+
+  const wordCount = prompt.match(
+    /字数(?:控制在|要求|限制)[^\n\d]{0,12}(\d+)\s*[~～\-至到]\s*(\d+)\s*字/u,
+  );
+  if (wordCount) {
+    return { min: Number(wordCount[1]), max: Number(wordCount[2]) };
   }
 
   const matches = [...prompt.matchAll(/(\d+)\s*[~～\-至到]\s*(\d+)\s*字/gu)];
@@ -500,9 +508,11 @@ export function scheduledOverallLengthRange(
 
   const only = matches[0]!;
   const idx = only.index ?? 0;
-  const before = prompt.slice(Math.max(0, idx - 24), idx);
+  const before = prompt.slice(Math.max(0, idx - 32), idx);
   // A lone range under a subsection label is not a whole-message constraint.
-  if (/寄语|标题|开场|结尾|问候语|短句|一句话/.test(before)) return null;
+  if (/寄语|标题|开场|结尾|问候语|短句|一句话|每日一句/.test(before)) {
+    return null;
+  }
   return { min: Number(only[1]), max: Number(only[2]) };
 }
 

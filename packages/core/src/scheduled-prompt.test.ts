@@ -79,6 +79,47 @@ describe("scheduled prompt contract", () => {
     assert.ok(!tooLong.some((x) => /15~40/.test(x)));
   });
 
+  it("prefers 整体控制在 over bare 控制在 under 今日寄语", () => {
+    const realPrompt = `这是每天早晨主动发送给用户的天气与晨间问候。
+
+请先联网查询今天 {{location}} 的最新天气，再以当前 Persona 的身份主动向用户发送消息。
+
+第三部分：每日一句
+每天必须生成一句简短的「今日寄语」。
+要求：
+- 控制在 15~40 字
+格式：
+「今日寄语：xxx」
+
+【全局要求】
+- 保留换行
+- 整体控制在 300～500 字`;
+    const output = `早上好呀。
+
+🌤️ 深圳今日天气｜8月13日
+🌡️ 温度：27℃ ~ 34℃
+☁️ 天气：多云
+🌧️ 降雨：午后有短时阵雨
+💨 风力：东南风 2～3 级
+
+👕 穿衣：轻薄透气。
+☂️ 出行：带伞防晒。
+
+今日寄语：云会路过，舒服的节奏可以自己留下。
+
+今天也慢慢来。`;
+    // ~120 chars — below 300 overall, but far above 寄语 15~40
+    const issues = scheduledOutputIssues(realPrompt, output);
+    assert.ok(
+      issues.some((x) => /要求 300~500 字/.test(x)),
+      JSON.stringify(issues),
+    );
+    assert.ok(!issues.some((x) => /15~40/.test(x)), JSON.stringify(issues));
+
+    const longEnough = `${output}\n${"今天也一起慢慢走。".repeat(20)}`;
+    assert.deepEqual(scheduledOutputIssues(realPrompt, longEnough), []);
+  });
+
   it("accepts a structured weather greeting", () => {
     const output = `早上好呀，今天也慢慢醒来吧。
 

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import {
+  trimWebSearchContext,
+  WEB_SEARCH_CONTEXT_MAX_CHARS,
+} from "./client.js";
 import { formatCurrentTime, loadLlmConfigFromEnv } from "./client.js";
 
 describe("formatCurrentTime", () => {
@@ -33,5 +37,24 @@ describe("loadLlmConfigFromEnv", () => {
 
   it("requires LLM_API_KEY for platform", () => {
     assert.throws(() => loadLlmConfigFromEnv({}), /LLM_API_KEY/);
+  });
+});
+
+describe("trimWebSearchContext", () => {
+  it("caps oversized search JSON by dropping trailing hits", () => {
+    const results = Array.from({ length: 8 }, (_, i) => ({
+      title: `hit-${i}`,
+      url: `https://example.com/${i}`,
+      snippet: "x".repeat(900),
+    }));
+    const raw = JSON.stringify({ query: "上海 天气", results });
+    assert.ok(raw.length > WEB_SEARCH_CONTEXT_MAX_CHARS);
+    const trimmed = trimWebSearchContext(raw);
+    assert.ok(trimmed.length <= WEB_SEARCH_CONTEXT_MAX_CHARS + 1);
+    const parsed = JSON.parse(trimmed.replace(/…$/, "")) as {
+      results: Array<{ snippet: string }>;
+    };
+    assert.ok(parsed.results.length < 8);
+    assert.ok(parsed.results.every((r) => r.snippet.length <= 480));
   });
 });

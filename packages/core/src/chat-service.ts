@@ -23,6 +23,7 @@ import {
 import {
   LlmClient,
   WebSearchClient,
+  trimWebSearchContext,
   type BuiltinToolName,
   type ChatCallOptions,
   type LlmUpstream,
@@ -158,11 +159,75 @@ export interface ScheduledChatRequest {
   }) => void;
 }
 
-function scheduledSearchQuery(
+/** Particles / pronouns / relative days that must never be a weather location. */
+const WEATHER_LOCATION_NOISE = new Set([
+  "的",
+  "了",
+  "着",
+  "吗",
+  "呢",
+  "吧",
+  "啊",
+  "呀",
+  "嘛",
+  "我",
+  "你",
+  "他",
+  "她",
+  "它",
+  "咱们",
+  "大家",
+  "今天",
+  "今日",
+  "明天",
+  "明日",
+  "昨天",
+  "昨日",
+  "后天",
+  "前天",
+]);
+
+function normalizeWeatherLocation(value: string): string {
+  return value
+    .trim()
+    .replace(/[的之]$/u, "")
+    .trim();
+}
+
+function isUsableWeatherLocation(value: string): boolean {
+  const loc = normalizeWeatherLocation(value);
+  if (loc.length < 2) return false;
+  if (WEATHER_LOCATION_NOISE.has(loc)) return false;
+  if (/^[的了着吗呢吧啊呀嘛]+$/u.test(loc)) return false;
+  return true;
+}
+
+/** Prefer explicit city names; never capture the particle in “今天的天气”. */
+export function extractWeatherLocation(prompt: string): string {
+  const candidates = [
+    prompt.match(/🌤️\s*([^\n｜|]{1,40}?)\s*今日天气/u)?.[1],
+    prompt.match(
+      /(?:查询|播报|发送|推送|告诉我)\s*(?:一下)?\s*(?:今天|今日)?\s*([\u4e00-\u9fffA-Za-z0-9]{2,20}?)(?:的)?(?:最新)?天气/u,
+    )?.[1],
+    prompt.match(
+      /(?:今天|今日)\s*([\u4e00-\u9fffA-Za-z0-9]{2,20}?)(?:的)?(?:最新)?天气/u,
+    )?.[1],
+    prompt.match(
+      /([\u4e00-\u9fffA-Za-z0-9]{2,20}?)(?:的)?(?:今日|今天)?(?:最新)?天气/u,
+    )?.[1],
+  ];
+  for (const candidate of candidates) {
+    const loc = normalizeWeatherLocation(candidate ?? "");
+    if (isUsableWeatherLocation(loc)) return loc;
+  }
+  return "";
+}
+
+export function scheduledSearchQuery(
   prompt: string,
   executionTime: string,
   timeZone: string,
-): string {
+): { query: string; location?: string; missingLocation?: boolean } {
   const date = new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
@@ -170,21 +235,23 @@ function scheduledSearchQuery(
     day: "2-digit",
   }).format(new Date(executionTime));
   if (/天气/.test(prompt)) {
-    const location =
-      prompt.match(/🌤️\s*([^\n｜|]{1,40}?)\s*今日天气/)?.[1]?.trim() ||
-      prompt
-        .match(
-          /(?:今天|今日)\s*([^，。\n]{1,40}?)\s*(?:的)?(?:最新)?天气/,
-        )?.[1]
-        ?.trim() ||
-      "";
-    return `${date} ${location} 天气 最低温 最高温 降雨 风向 风力`.replace(
-      /\s+/g,
-      " ",
-    );
+    const location = extractWeatherLocation(prompt);
+    if (!location) {
+      return {
+        query: `${date} 天气 最低温 最高温 降雨 风向 风力`,
+        missingLocation: true,
+      };
+    }
+    return {
+      query: `${date} ${location} 天气 最低温 最高温 降雨 风向 风力`.replace(
+        /\s+/g,
+        " ",
+      ),
+      location,
+    };
   }
   const task = prompt.replace(/\s+/g, " ").trim().slice(0, 240);
-  return `${date} ${task}`;
+  return { query: `${date} ${task}` };
 }
 
 function hasUsableSearchResults(value: string): boolean {
@@ -198,6 +265,9 @@ function hasUsableSearchResults(value: string): boolean {
     return true;
   }
 }
+
+/** Scheduled synthesis needs room for a structured bulletin; default 1024 is tight for reasoning models. */
+const SCHEDULED_MAX_TOKENS = 3072;
 
 export interface InboundChatResult {
   kind: "reply" | "reject" | "skip";
@@ -1000,13 +1070,21 @@ export class ChatService {
     }
     let webSearchContext: string | undefined;
     if (req.webSearchEnabled) {
-      const query = scheduledSearchQuery(req.prompt, executionTime, timeZone);
+      const planned = scheduledSearchQuery(req.prompt, executionTime, timeZone);
+      if (planned.missingLocation) {
+        req.onProgress?.({
+          stage: "web_search",
+          message: "天气任务缺少可用地点，已中止联网查询",
+        });
+        return { kind: "skip", skipReason: "web_search_failed:missing_location" };
+      }
+      const query = planned.query;
       req.onProgress?.({
         stage: "web_search",
         message: `开始联网查询：${query}`,
       });
       try {
-        webSearchContext = this.opts.webSearchRunner
+        const rawContext = this.opts.webSearchRunner
           ? await this.opts.webSearchRunner(
               query,
               this.opts.webSearchMaxResults ?? 5,
@@ -1015,6 +1093,7 @@ export class ChatService {
               query,
               this.opts.webSearchMaxResults ?? 5,
             );
+        webSearchContext = trimWebSearchContext(rawContext);
         if (!hasUsableSearchResults(webSearchContext)) {
           req.onProgress?.({
             stage: "web_search",
@@ -1063,6 +1142,14 @@ export class ChatService {
       ownerUserId: bot?.owner_user_id,
       includeTimeTool: false,
     });
+    // Fresh data was fetched server-side (or the task does not need it). Do not
+    // re-expose web_search / time tools — that doubles latency and can leave
+    // reasoning models with an empty content turn.
+    callOpts.tools = [];
+    callOpts.webSearch = undefined;
+    callOpts.requireToolUse = false;
+    callOpts.maxToolRounds = 0;
+    callOpts.maxTokens = SCHEDULED_MAX_TOKENS;
     req.onProgress?.({ stage: "generation", message: "开始生成定时消息" });
     let usage = await client.chatWithUsage(messages, callOpts);
     req.onProgress?.({

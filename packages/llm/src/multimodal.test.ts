@@ -232,6 +232,105 @@ describe("multimodal messages (platform path)", () => {
     assert.deepEqual(res.toolsUsed, ["web_search"]);
   });
 
+  it("retries once when reasoning filled the token budget with empty content", async () => {
+    const captured: Captured[] = [];
+    const original = globalThis.fetch;
+    restoreFetch = () => {
+      globalThis.fetch = original;
+      capturingFetch = null;
+      restoreFetch = null;
+    };
+    let n = 0;
+    const impl = (async (_input: unknown, init?: RequestInit) => {
+      const call: Captured = {
+        url: String(
+          typeof _input === "object" && _input && "url" in _input
+            ? (_input as { url: string }).url
+            : _input,
+        ),
+        body: init?.body
+          ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+          : {},
+      };
+      captured.push(call);
+      n++;
+      if (n === 1) {
+        return json({
+          id: "cmpl-1",
+          object: "chat.completion",
+          created: 1,
+          model: "reasoning-model",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: "",
+                reasoning_content: "已完成内部推理",
+              },
+              finish_reason: "length",
+            },
+          ],
+          usage: {
+            prompt_tokens: 1800,
+            completion_tokens: 1024,
+            total_tokens: 2824,
+          },
+        });
+      }
+      return json(ANSWER);
+    }) as typeof globalThis.fetch;
+    globalThis.fetch = impl;
+    capturingFetch = impl;
+
+    const res = await platform().chatWithUsage(
+      [
+        { role: "system", content: "服务端已完成联网查询" },
+        { role: "user", content: "生成天气预报" },
+      ],
+      { tools: ["web_search"], maxTokens: 1024 },
+    );
+
+    assert.equal(res.text, "看到了");
+    assert.equal(captured.length, 2);
+    assert.equal(captured[1]?.body.tools, undefined);
+    assert.ok(Number(captured[1]?.body.max_tokens) >= 3072);
+  });
+
+  it("reports finish_reason when empty content cannot be recovered", async () => {
+    const original = globalThis.fetch;
+    restoreFetch = () => {
+      globalThis.fetch = original;
+      capturingFetch = null;
+      restoreFetch = null;
+    };
+    const impl = (async () =>
+      json({
+        id: "cmpl-empty",
+        object: "chat.completion",
+        created: 1,
+        model: "blank-model",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "" },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 0, total_tokens: 10 },
+      })) as typeof globalThis.fetch;
+    globalThis.fetch = impl;
+    capturingFetch = impl;
+
+    await assert.rejects(
+      () =>
+        platform().chatWithUsage([{ role: "user", content: "hi" }], {
+          tools: [],
+        }),
+      /empty content \(primary; finish_reason=stop/,
+    );
+  });
+
   it("forwards user content parts verbatim", async () => {
     const captured = installFetch();
     const res = await platform().chatWithUsage([

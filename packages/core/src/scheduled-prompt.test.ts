@@ -4,6 +4,10 @@ import {
   buildScheduledMessages,
   scheduledOutputIssues,
 } from "./prompt.js";
+import {
+  extractWeatherLocation,
+  scheduledSearchQuery,
+} from "./chat-service.js";
 
 const taskPrompt = `这是每天早晨主动发送给用户的天气与晨间问候。
 🌤️ {{location}}今日天气｜{日期}
@@ -67,5 +71,28 @@ describe("scheduled prompt contract", () => {
 
 早餐别忘啦，今天也陪你稳稳往前走。`;
     assert.deepEqual(scheduledOutputIssues(taskPrompt, output), []);
+  });
+
+  it("extracts a city and never treats 的 as the location", () => {
+    assert.equal(extractWeatherLocation("播报今天上海的天气"), "上海");
+    assert.equal(
+      extractWeatherLocation(taskPrompt.replace("{{location}}", "杭州")),
+      "杭州",
+    );
+    assert.equal(extractWeatherLocation("今天的天气怎么样"), "");
+    const planned = scheduledSearchQuery(
+      "今天的天气",
+      "2026-08-13T01:00:00.000Z",
+      "Asia/Shanghai",
+    );
+    assert.equal(planned.missingLocation, true);
+    assert.doesNotMatch(planned.query, /\s的\s/);
+    const shanghai = scheduledSearchQuery(
+      "🌤️ 上海今日天气｜{日期}",
+      "2026-08-13T01:00:00.000Z",
+      "Asia/Shanghai",
+    );
+    assert.equal(shanghai.location, "上海");
+    assert.match(shanghai.query, /上海.*天气/);
   });
 });

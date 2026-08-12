@@ -102,6 +102,122 @@ export interface ChatResult {
    * fresh data must check this rather than trust the flag.
    */
   toolsUsed: BuiltinToolName[];
+  /** Last completion finish_reason when the provider reported one. */
+  finishReason?: string | null;
+}
+
+/** Soft caps so search JSON does not crowd out the model's reply budget. */
+export const WEB_SEARCH_CONTEXT_MAX_CHARS = 3500;
+export const WEB_SEARCH_SNIPPET_MAX_CHARS = 480;
+
+/**
+ * Shrink a web-search tool payload (or plain text) before it enters a prompt.
+ * Prefer dropping trailing hits over truncating mid-JSON when possible.
+ */
+export function trimWebSearchContext(
+  raw: string,
+  maxTotal = WEB_SEARCH_CONTEXT_MAX_CHARS,
+  maxSnippet = WEB_SEARCH_SNIPPET_MAX_CHARS,
+): string {
+  const text = (raw ?? "").trim();
+  if (!text) return text;
+  if (text.length <= maxTotal) {
+    try {
+      const parsed = JSON.parse(text) as {
+        query?: unknown;
+        results?: unknown;
+        error?: unknown;
+      };
+      if (!Array.isArray(parsed.results)) return text;
+      const results = parsed.results
+        .filter((item): item is WebSearchHit => Boolean(item && typeof item === "object"))
+        .map((item) => ({
+          title: String(item.title ?? "").slice(0, 120),
+          url: String(item.url ?? "").slice(0, 300),
+          snippet: String(item.snippet ?? "").slice(0, maxSnippet),
+        }));
+      const out = JSON.stringify({
+        query: typeof parsed.query === "string" ? parsed.query : undefined,
+        results,
+        ...(parsed.error !== undefined ? { error: parsed.error } : {}),
+      });
+      if (out.length <= maxTotal) return out;
+    } catch {
+      return text;
+    }
+  }
+  try {
+    const parsed = JSON.parse(text) as {
+      query?: unknown;
+      results?: unknown;
+      error?: unknown;
+    };
+    if (Array.isArray(parsed.results)) {
+      const results = parsed.results
+        .filter((item): item is WebSearchHit => Boolean(item && typeof item === "object"))
+        .map((item) => ({
+          title: String(item.title ?? "").slice(0, 120),
+          url: String(item.url ?? "").slice(0, 300),
+          snippet: String(item.snippet ?? "").slice(0, maxSnippet),
+        }));
+      while (results.length > 1) {
+        const candidate = JSON.stringify({
+          query: typeof parsed.query === "string" ? parsed.query : undefined,
+          results,
+          ...(parsed.error !== undefined ? { error: parsed.error } : {}),
+        });
+        if (candidate.length <= maxTotal) return candidate;
+        results.pop();
+      }
+      const last = JSON.stringify({
+        query: typeof parsed.query === "string" ? parsed.query : undefined,
+        results,
+        ...(parsed.error !== undefined ? { error: parsed.error } : {}),
+      });
+      return last.length <= maxTotal ? last : `${last.slice(0, maxTotal)}…`;
+    }
+  } catch {
+    /* plain text */
+  }
+  return text.length <= maxTotal ? text : `${text.slice(0, maxTotal)}…`;
+}
+
+function messageContentText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      const p = part as { type?: unknown; text?: unknown };
+      return p.type === "text" && typeof p.text === "string" ? p.text : "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function reasoningContentChars(message: unknown): number {
+  if (!message || typeof message !== "object") return 0;
+  const msg = message as {
+    reasoning_content?: unknown;
+    reasoning?: unknown;
+  };
+  const raw = msg.reasoning_content ?? msg.reasoning;
+  return typeof raw === "string" ? raw.trim().length : 0;
+}
+
+function emptyContentError(meta: {
+  stage: string;
+  finishReason?: string | null;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  reasoningChars: number;
+}): Error {
+  const reason = meta.finishReason ?? "unknown";
+  return new Error(
+    `LLM returned empty content (${meta.stage}; finish_reason=${reason}; model=${meta.model}; prompt=${meta.promptTokens}; completion=${meta.completionTokens}; reasoning_chars=${meta.reasoningChars})`,
+  );
 }
 
 export type BuiltinToolName = "get_current_time" | "web_search";
@@ -390,6 +506,66 @@ export class LlmClient {
     let completionTokens = 0;
     let model = modelOverride ?? this.model;
     const toolsUsed: BuiltinToolName[] = [];
+    let emptyRetryUsed = false;
+
+    const resolveMaxTokens = (bump = false): number => {
+      const base = maxTokensOverride ?? this.maxTokens;
+      if (!bump) return base;
+      return Math.min(Math.max(base * 2, 3072), 8192);
+    };
+
+    const takeTextOrRetry = async (params: {
+      stage: string;
+      choice: { content?: string | null } | undefined;
+      finishReason?: string | null;
+      messages: ChatCompletionMessageParam[];
+    }): Promise<{ text: string; finishReason: string | null }> => {
+      const text = messageContentText(params.choice?.content);
+      const finishReason = params.finishReason ?? null;
+      const reasoningChars = reasoningContentChars(params.choice);
+      if (text) return { text, finishReason };
+
+      const shouldRetry =
+        !emptyRetryUsed &&
+        (finishReason === "length" || reasoningChars > 0);
+      if (shouldRetry) {
+        emptyRetryUsed = true;
+        const retryRes = await this.createCompletion(
+          params.messages,
+          undefined,
+          upstream,
+          modelOverride,
+          resolveMaxTokens(true),
+          false,
+        );
+        promptTokens += retryRes.usage?.prompt_tokens ?? 0;
+        completionTokens += retryRes.usage?.completion_tokens ?? 0;
+        model = retryRes.model || modelOverride || this.model;
+        const retryChoice = retryRes.choices[0]?.message;
+        const retryText = messageContentText(retryChoice?.content);
+        const retryReason =
+          (retryRes.choices[0] as { finish_reason?: string | null } | undefined)
+            ?.finish_reason ?? null;
+        if (retryText) return { text: retryText, finishReason: retryReason };
+        throw emptyContentError({
+          stage: `${params.stage}+retry`,
+          finishReason: retryReason,
+          model,
+          promptTokens,
+          completionTokens,
+          reasoningChars: reasoningContentChars(retryChoice),
+        });
+      }
+
+      throw emptyContentError({
+        stage: params.stage,
+        finishReason,
+        model,
+        promptTokens,
+        completionTokens,
+        reasoningChars,
+      });
+    };
 
     for (let round = 0; round <= maxRounds; round++) {
       const forceTools =
@@ -425,6 +601,9 @@ export class LlmClient {
       if (!choice) {
         throw new Error("LLM returned empty choice");
       }
+      const finishReason =
+        (res.choices[0] as { finish_reason?: string | null } | undefined)
+          ?.finish_reason ?? null;
 
       const toolCalls = choice.tool_calls;
       if (toolsOpt && toolCalls?.length) {
@@ -472,10 +651,16 @@ export class LlmClient {
         completionTokens += finalRes.usage?.completion_tokens ?? 0;
         model = finalRes.model || modelOverride || this.model;
         const finalChoice = finalRes.choices[0]?.message;
-        const finalText = (finalChoice?.content ?? "").trim();
-        if (!finalText) {
-          throw new Error("LLM returned empty content after tool results");
-        }
+        const finalReason =
+          (finalRes.choices[0] as { finish_reason?: string | null } | undefined)
+            ?.finish_reason ?? null;
+        const { text: finalText, finishReason: usedReason } =
+          await takeTextOrRetry({
+            stage: "after tool results",
+            choice: finalChoice,
+            finishReason: finalReason,
+            messages: apiMessages,
+          });
         return {
           text: finalText,
           promptTokens,
@@ -483,13 +668,16 @@ export class LlmClient {
           totalTokens: promptTokens + completionTokens,
           model,
           toolsUsed,
+          finishReason: usedReason,
         };
       }
 
-      const text = (choice.content ?? "").trim();
-      if (!text) {
-        throw new Error("LLM returned empty content");
-      }
+      const { text, finishReason: usedReason } = await takeTextOrRetry({
+        stage: "primary",
+        choice,
+        finishReason,
+        messages: apiMessages,
+      });
       return {
         text,
         promptTokens,
@@ -497,6 +685,7 @@ export class LlmClient {
         totalTokens: promptTokens + completionTokens,
         model,
         toolsUsed,
+        finishReason: usedReason,
       };
     }
 
@@ -606,6 +795,8 @@ export class LlmClient {
     }
     type GatewayMsg = {
       content?: string | null;
+      reasoning_content?: string | null;
+      reasoning?: string | null;
       tool_calls?: Array<{
         id: string;
         type: "function";
@@ -613,7 +804,10 @@ export class LlmClient {
       }>;
     };
     type GatewayRes = {
-      choices?: Array<{ message?: GatewayMsg }>;
+      choices?: Array<{
+        message?: GatewayMsg;
+        finish_reason?: string | null;
+      }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
       model?: string;
     };
@@ -628,9 +822,15 @@ export class LlmClient {
       choices: (data.choices ?? []).map((c) => ({
         message: {
           content: c.message?.content ?? null,
+          ...(typeof c.message?.reasoning_content === "string"
+            ? { reasoning_content: c.message.reasoning_content }
+            : typeof c.message?.reasoning === "string"
+              ? { reasoning_content: c.message.reasoning }
+              : {}),
           tool_calls: c.message?.tool_calls,
           role: "assistant" as const,
         },
+        finish_reason: c.finish_reason ?? null,
       })),
       usage: {
         prompt_tokens: data.usage?.prompt_tokens ?? 0,
@@ -763,7 +963,7 @@ export class WebSearchClient {
   /** Tool-friendly JSON string for LLM tool results. */
   async searchAsToolResult(query: string, maxResults = 5): Promise<string> {
     const results = await this.search(query, maxResults);
-    return JSON.stringify({ query, results });
+    return trimWebSearchContext(JSON.stringify({ query, results }));
   }
 }
 

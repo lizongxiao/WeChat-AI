@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   buildScheduledMessages,
   buildScheduledRepairUserMessage,
+  correctScheduledWeekday,
   extractScheduledOutputSkeleton,
   normalizeScheduledLayout,
   scheduledOutputIssues,
@@ -41,7 +42,11 @@ describe("scheduled prompt contract", () => {
     assert.equal(messages.length, 2);
     assert.equal(messages[0]?.role, "system");
     assert.match(String(messages[0]?.content), /任务内容与格式要求优先于 Persona/);
-    assert.match(String(messages[0]?.content), /2026-08-13 09:00/);
+    assert.match(String(messages[0]?.content), /2026-08-13 09:00 周四/);
+    assert.match(String(messages[0]?.content), /今天是周四/);
+    assert.match(String(messages[0]?.content), /8月13日 周四/);
+    assert.doesNotMatch(String(messages[0]?.content), /\{日期\}/);
+    assert.doesNotMatch(String(messages[0]?.content), /周三/);
     assert.match(String(messages[0]?.content), /服务端已完成联网查询/);
     assert.match(String(messages[0]?.content), /按该时刻自然问候/);
     assert.match(String(messages[0]?.content), /27~34℃/);
@@ -50,6 +55,52 @@ describe("scheduled prompt contract", () => {
     assert.match(String(messages[1]?.content), /硬性检查清单/);
     assert.match(String(messages[1]?.content), /🌡️ 温度/);
     assert.match(String(messages[1]?.content), /今日寄语/);
+  });
+
+  it("asks the user to reply when keep-alive is piggybacked", () => {
+    const messages = buildScheduledMessages({
+      systemPrompt: "你是助手。",
+      memories: [],
+      scheduledPrompt: "🌤️ 深圳今日天气｜{日期}",
+      executionTime: "2026-08-13T01:00:00.000Z",
+      timeZone: "Asia/Shanghai",
+      webSearchRequired: false,
+      askKeepAliveReply: true,
+    });
+    assert.match(
+      String(messages[0]?.content),
+      /收尾必须自然请对方回一句/,
+    );
+  });
+
+  it("uses Shanghai weekday at UTC midnight, not the previous UTC day", () => {
+    const messages = buildScheduledMessages({
+      systemPrompt: "你是助手。",
+      memories: [],
+      scheduledPrompt: "🌤️ 深圳今日天气｜{日期}",
+      executionTime: "2026-08-12T16:00:00.000Z",
+      timeZone: "Asia/Shanghai",
+      webSearchRequired: false,
+    });
+    const system = String(messages[0]?.content);
+    assert.match(system, /2026-08-13 00:00 周四/);
+    assert.match(system, /8月13日 周四/);
+    assert.doesNotMatch(system, /周三/);
+  });
+
+  it("rewrites a wrong weekday next to today's date before send", () => {
+    const iso = "2026-08-13T01:00:00.000Z";
+    const tz = "Asia/Shanghai";
+    const bulletin =
+      "🌤️ 深圳今日天气｜8月13日 周三\n🌡️ 温度：28℃ ～ 34℃\n每周三记得浇花。";
+    const fixed = correctScheduledWeekday(bulletin, iso, tz);
+    assert.match(fixed, /8月13日 周四/);
+    assert.doesNotMatch(fixed, /8月13日 周三/);
+    assert.match(fixed, /每周三记得浇花/);
+    assert.equal(
+      correctScheduledWeekday("🌤️ 深圳今日天气｜8月13日星期三", iso, tz),
+      "🌤️ 深圳今日天气｜8月13日星期四",
+    );
   });
 
   it("accepts compact emoji labels and builds a skeleton repair prompt", () => {

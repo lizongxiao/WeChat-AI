@@ -89,3 +89,54 @@ export async function savePendingScheduledPlan(db: RedisStore, plan: PendingSche
 export async function getPendingScheduledPlan(db: RedisStore,botId:string,peerId:string){return db.getJson<PendingScheduledPlan>(K.scheduledPending(botId,peerId));}
 export async function clearPendingScheduledPlan(db: RedisStore,botId:string,peerId:string){await db.redis.del(K.scheduledPending(botId,peerId));}
 export async function tryAcquireScheduledExecutionLock(db: RedisStore, source:string,id:string, minute:string,ttlSec=120){return (await db.redis.set(K.scheduledExecutionLock(source,id,minute),"1","EX",ttlSec,"NX")) === "OK";}
+
+export const SCHEDULED_OUTBOX_TTL_SEC = 36 * 3600;
+
+export interface ScheduledOutboxItem {
+  botId: string;
+  peerId: string;
+  source: "task" | "subscription";
+  id: string;
+  texts: string[];
+  createdAt: string;
+}
+
+export async function saveScheduledOutbox(
+  db: RedisStore,
+  item: Omit<ScheduledOutboxItem, "createdAt"> & { createdAt?: string },
+  ttlSec = SCHEDULED_OUTBOX_TTL_SEC,
+): Promise<ScheduledOutboxItem> {
+  const row: ScheduledOutboxItem = {
+    ...item,
+    texts: item.texts.map((t) => t.trim()).filter(Boolean),
+    createdAt: item.createdAt || new Date().toISOString(),
+  };
+  if (!row.texts.length) return row;
+  await db.redis.set(
+    K.scheduledOutbox(row.botId, row.peerId),
+    json(row),
+    "EX",
+    Math.max(60, ttlSec),
+  );
+  return row;
+}
+
+export async function takeScheduledOutbox(
+  db: RedisStore,
+  botId: string,
+  peerId: string,
+): Promise<ScheduledOutboxItem | null> {
+  const key = K.scheduledOutbox(botId, peerId);
+  const raw = await db.redis.get(key);
+  if (!raw) return null;
+  await db.redis.del(key);
+  try {
+    const parsed = JSON.parse(raw) as ScheduledOutboxItem;
+    if (!parsed || !Array.isArray(parsed.texts) || !parsed.texts.length) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}

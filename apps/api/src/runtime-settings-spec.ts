@@ -58,6 +58,14 @@ export type RuntimeSettingKey =
   | "proactiveMaxPerScan"
   | "proactiveLockTtlSec"
   | "proactiveAttemptCooldownHours"
+  // keepalive
+  | "keepAliveEnabled"
+  | "keepAliveAfterHours"
+  | "keepAliveMaxHours"
+  | "keepAliveMinIntervalHours"
+  | "keepAliveQuietHours"
+  | "keepAliveMaxPerScan"
+  | "keepAliveDueSoonHours"
   // p2p
   | "p2pEnabled"
   | "p2pBindCodeTtlSec"
@@ -136,6 +144,7 @@ export type SettingGroupId =
   | "search"
   | "chatflow"
   | "proactive"
+  | "keepalive"
   | "p2p"
   | "trychat"
   | "auth"
@@ -166,6 +175,11 @@ export const SETTING_GROUPS: SettingGroup[] = [
   },
   { id: "chatflow", label: "Chatflow", desc: "图执行上限与 HTTP 节点白名单" },
   { id: "proactive", label: "主动联系", desc: "闲置唤醒的频率与静默时段" },
+  {
+    id: "keepalive",
+    label: "会话保活",
+    desc: "定时订阅用户到期前的短提醒，请对方回一句以续期会话令牌",
+  },
   { id: "p2p", label: "用户互聊", desc: "@用户名 转发的时效与配额" },
   { id: "trychat", label: "网页试聊", desc: "试聊开关与每日/每会话配额" },
   { id: "auth", label: "注册与邀请", desc: "本地注册、密码强度与邀请码策略" },
@@ -641,6 +655,71 @@ export const SETTING_SPECS: SettingSpec[] = [
     type: "int",
     min: 0,
     max: 168,
+  },
+
+  // ── 会话保活 ──
+  {
+    key: "keepAliveEnabled",
+    env: "KEEP_ALIVE_ENABLED",
+    group: "keepalive",
+    label: "启用会话保活",
+    type: "bool",
+    hint: "只针对有启用订阅或定时任务的用户；与「主动联系」无关",
+  },
+  {
+    key: "keepAliveAfterHours",
+    env: "KEEP_ALIVE_AFTER_HOURS",
+    group: "keepalive",
+    label: "距上次入站多少小时后开始提醒",
+    type: "int",
+    min: 1,
+    max: 72,
+  },
+  {
+    key: "keepAliveMaxHours",
+    env: "KEEP_ALIVE_MAX_HOURS",
+    group: "keepalive",
+    label: "距上次入站超过多少小时停止尝试",
+    type: "int",
+    min: 2,
+    max: 168,
+    hint: "超过后会话令牌多半已失效，继续发等于骚扰失败",
+  },
+  {
+    key: "keepAliveMinIntervalHours",
+    env: "KEEP_ALIVE_MIN_INTERVAL_HOURS",
+    group: "keepalive",
+    label: "两次保活最小间隔(小时)",
+    type: "int",
+    min: 1,
+    max: 168,
+  },
+  {
+    key: "keepAliveQuietHours",
+    env: "KEEP_ALIVE_QUIET_HOURS",
+    group: "keepalive",
+    label: "独立提醒静默时段",
+    type: "string",
+    hint: "如 22-8；留空关闭。定时天气仍按原计划发送",
+  },
+  {
+    key: "keepAliveMaxPerScan",
+    env: "KEEP_ALIVE_MAX_PER_SCAN",
+    group: "keepalive",
+    label: "每轮最多提醒人数",
+    type: "int",
+    min: 1,
+    max: 100,
+  },
+  {
+    key: "keepAliveDueSoonHours",
+    env: "KEEP_ALIVE_DUE_SOON_HOURS",
+    group: "keepalive",
+    label: "定时即将发送则跳过独立提醒(小时)",
+    type: "int",
+    min: 0,
+    max: 24,
+    hint: "避免早上天气和保活连发",
   },
 
   // ── 用户互聊 ──

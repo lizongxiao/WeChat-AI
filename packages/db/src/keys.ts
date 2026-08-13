@@ -55,6 +55,9 @@ export const K = {
 
   contextToken: (botId: string, peerId: string) =>
     `wa:ctx:${botId}:${peerId}`,
+  /** ISO timestamp of the inbound that last refreshed context_token. */
+  contextTokenAt: (botId: string, peerId: string) =>
+    `wa:ctxat:${botId}:${peerId}`,
 
   /** Peers with proactive outreach enabled for a bot (SET of peerId) */
   proactivePeersByBot: (botId: string) => `wa:proactive:peers:${botId}`,
@@ -81,6 +84,12 @@ export const K = {
   scheduledPending: (botId: string, peerId: string) => `wa:schedule:pending:${botId}:${peerId}`,
   /** NX execution gate: source id + scheduled UTC minute. */
   scheduledExecutionLock: (source: string, id: string, minute: string) => `wa:schedule:lock:${source}:${id}:${minute}`,
+  /** Latest missed scheduled bulletin, delivered on the next inbound. */
+  scheduledOutbox: (botId: string, peerId: string) =>
+    `wa:schedule:outbox:${botId}:${peerId}`,
+  /** Distributed lock while generating a keep-alive ping */
+  keepAliveLock: (botId: string, peerId: string) =>
+    `wa:keepalive:lock:${botId}:${peerId}`,
 
   audit: "wa:audit",
   usageDay: (day: string) => `wa:usage:day:${day}`,

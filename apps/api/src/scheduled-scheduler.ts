@@ -1,8 +1,62 @@
 import { randomUUID } from "node:crypto";
-import { getContextToken, getSystemSubscriptionService, getScheduledTask, getUserSubscription, isServiceOpenToPersona, isUserSubscriptionActiveForCurrentPersona, listScheduledTasks, listUserSubscriptions, tryAcquireScheduledExecutionLock, updateScheduledTask, updateUserSubscription, type Db } from "@wechat-ai/db";
-import type { ChatService, InboundChatResult } from "@wechat-ai/core";
+import {
+  ensurePeer,
+  getContextTokenInfo,
+  getSystemSubscriptionService,
+  isServiceOpenToPersona,
+  isUserSubscriptionActiveForCurrentPersona,
+  listScheduledTasks,
+  listUserSubscriptions,
+  markPeerKeepAlive,
+  releaseKeepAliveLock,
+  saveScheduledOutbox,
+  tryAcquireKeepAliveLock,
+  tryAcquireScheduledExecutionLock,
+  updateScheduledTask,
+  updateUserSubscription,
+  type Db,
+  type ScheduledTask,
+  type UserSubscription,
+} from "@wechat-ai/db";
+import {
+  DEFAULT_KEEP_ALIVE_POLICY,
+  isKeepAliveEligible,
+  isStaleKeepAliveError,
+  shouldPiggybackKeepAlive,
+  type ChatService,
+  type InboundChatResult,
+  type KeepAlivePolicy,
+} from "@wechat-ai/core";
 
-export interface ScheduledSchedulerOptions { db: Db; chat: ChatService; intervalSec: number; lockTtlSec: number; log?: (m:string,e?:unknown)=>void; sendReply:(botId:string,peerId:string,reply:InboundChatResult)=>Promise<{ok:boolean;reason?:string}>; }
+export type ScheduledSendResult = {
+  ok: boolean;
+  reason?: string;
+  error?: string;
+};
+
+export interface KeepAliveSchedulerConfig extends KeepAlivePolicy {
+  maxPerScan: number;
+  lockTtlSec: number;
+}
+
+export interface ScheduledSchedulerOptions {
+  db: Db;
+  chat: ChatService;
+  intervalSec: number;
+  lockTtlSec: number;
+  log?: (m: string, e?: unknown) => void;
+  sendReply: (
+    botId: string,
+    peerId: string,
+    reply: InboundChatResult,
+  ) => Promise<ScheduledSendResult>;
+  sendKeepAlive?: (
+    botId: string,
+    peerId: string,
+    text: string,
+  ) => Promise<ScheduledSendResult>;
+  keepAlive?: KeepAliveSchedulerConfig;
+}
 export interface ScheduledTestProgress {
   level: "info" | "warn" | "error";
   stage: string;
@@ -156,12 +210,237 @@ export class ScheduledScheduler {
         peerId:sub.peer_id,
       });
       const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,scheduledTestLockSource("subscription",runId),executionTime,service.timezone,event=>onProgress?.({...event,peerId:sub.peer_id}),locationHintFromParams(resolved.params));
-      if(result.sent){sent++;onProgress?.({level:"info",stage:"complete",message:"发送成功",peerId:sub.peer_id});}else {skipped++;details.push({peerId:sub.peer_id,reason:result.reason||"unknown"});onProgress?.({level:"error",stage:"complete",message:`发送失败：${result.reason||"unknown"}`,peerId:sub.peer_id});}
+      if(result.sent){sent++;onProgress?.({level:"info",stage:"complete",message:"发送成功",peerId:sub.peer_id});}
+      else if(result.reason==="queued_until_inbound"){skipped++;details.push({peerId:sub.peer_id,reason:result.reason});onProgress?.({level:"warn",stage:"complete",message:"会话令牌可能失效，已排队等用户开口补发",peerId:sub.peer_id});}
+      else {skipped++;details.push({peerId:sub.peer_id,reason:result.reason||"unknown"});onProgress?.({level:"error",stage:"complete",message:`发送失败：${result.reason||"unknown"}`,peerId:sub.peer_id});}
     }
     onProgress?.({level:skipped?"warn":"info",stage:"summary",message:`测试结束：发送 ${sent}，跳过 ${skipped}`});
     return {sent,skipped,matched:subs.length,details};
   }
+  applyRuntimeOptions(patch: Partial<Pick<ScheduledSchedulerOptions, "keepAlive">>): void {
+    if (patch.keepAlive) {
+      this.opts.keepAlive = { ...this.keepAliveConfig(), ...patch.keepAlive };
+    }
+  }
+  private keepAliveConfig(): KeepAliveSchedulerConfig {
+    return {
+      ...DEFAULT_KEEP_ALIVE_POLICY,
+      maxPerScan: 10,
+      lockTtlSec: 180,
+      ...this.opts.keepAlive,
+    };
+  }
+  private keepAlivePolicy(): KeepAlivePolicy {
+    const k = this.keepAliveConfig();
+    return {
+      enabled: k.enabled,
+      afterHours: k.afterHours,
+      maxHours: k.maxHours,
+      minIntervalHours: k.minIntervalHours,
+      quietHours: k.quietHours,
+      quietTimeZone: k.quietTimeZone,
+      dueSoonHours: k.dueSoonHours,
+    };
+  }
+  private peerKey(botId: string, peerId: string): string {
+    return `${botId}\0${peerId}`;
+  }
   private arm(ms:number){if(this.stopped)return;this.timer=setTimeout(()=>void this.tick().catch(e=>this.opts.log?.(`[schedule] tick error ${e instanceof Error?e.message:String(e)}`)).finally(()=>this.arm(this.opts.intervalSec*1000)),ms);}
-  async tick(now=new Date()){if(this.stopped||this.running)return {sent:0,skipped:0};this.running=true;let sent=0,skipped=0;try { const [tasks,subs]=await Promise.all([listScheduledTasks(this.opts.db),listUserSubscriptions(this.opts.db)]); for(const task of tasks){const oneTime=task.schedule_type==="one_time";const executeAt=task.execute_at?new Date(task.execute_at):null;const due=task.enabled&&(oneTime?Boolean(executeAt&&executeAt.getTime()<=now.getTime()&&!task.last_run_at):cronMatches(task.schedule,now,task.timezone));if(!oneTime&&(!task.next_run_at||due))await updateScheduledTask(this.opts.db,task.id,{next_run_at:nextCronRun(task.schedule,task.timezone,now)});if(!due)continue; const result=await this.run("task",task.id,task.bot_id,task.peer_id,task.persona_id,task.prompt,Boolean(task.web_search_enabled),now,"task",now,task.timezone);if(result.sent){sent++;if(oneTime)await updateScheduledTask(this.opts.db,task.id,{enabled:0,next_run_at:null});}else skipped++;} for(const sub of subs){if(!(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub)))continue;const service=await getSystemSubscriptionService(this.opts.db,sub.service_id);if(!service?.enabled||!(await isServiceOpenToPersona(this.opts.db,service.id,sub.persona_id)))continue;const due=cronMatches(service.schedule,now,service.timezone);if(!sub.next_run_at||due)await updateUserSubscription(this.opts.db,sub.id,{next_run_at:nextCronRun(service.schedule,service.timezone,now)});if(!due)continue; const resolved=resolveScheduledParams(sub.params,service.params_schema); const prompt=interpolate(service.prompt_template,resolved.params);if((await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,"subscription",now,service.timezone,undefined,locationHintFromParams(resolved.params))).sent)sent++;else skipped++;} } finally {this.running=false;} return {sent,skipped};}
-  private async run(source:"task"|"subscription",id:string,botId:string,peerId:string,personaId:string,prompt:string,web:boolean,now:Date,lockSource:string=source,executionTime:Date=now,timeZone="Asia/Shanghai",onProgress?:ScheduledTestProgressHandler,locationHint?:string):Promise<{sent:true}|{sent:false;reason:string}>{const key=minuteKey(now);onProgress?.({level:"info",stage:"lock",message:"正在获取执行锁"});if(!(await tryAcquireScheduledExecutionLock(this.opts.db,lockSource,id,key,this.opts.lockTtlSec))){onProgress?.({level:"warn",stage:"lock",message:"本分钟已有相同执行，去重锁拒绝"});return {sent:false,reason:"duplicate_execution_lock"};}try{onProgress?.({level:"info",stage:"context",message:"正在读取会话上下文"});const tok=await getContextToken(this.opts.db,botId,peerId);if(!tok)throw new Error("no_context_token");onProgress?.({level:"info",stage:"context",message:`已找到会话令牌（${tok.length} 字符）`});const r=await this.opts.chat.handleScheduled({botAccountId:botId,peerId,contextToken:tok,personaId,prompt,webSearchEnabled:web,source,executionTime:executionTime.toISOString(),timeZone,locationHint,onProgress:event=>onProgress?.({level:"info",stage:event.stage,message:event.message})});if(r.kind!=="reply"||!r.text)throw new Error(r.skipReason||r.kind);onProgress?.({level:"info",stage:"delivery",message:"内容生成成功，正在发送到微信"});const out=await this.opts.sendReply(botId,peerId,r);if(!out.ok)throw new Error(out.error?`${out.reason}: ${out.error}`:(out.reason||"send_failed"));const patch={last_run_at:now.toISOString(),last_status:"sent",last_error:null}; source==="task"?await updateScheduledTask(this.opts.db,id,patch):await updateUserSubscription(this.opts.db,id,patch);return {sent:true};}catch(e){const reason=e instanceof Error?e.message:String(e);onProgress?.({level:"error",stage:"error",message:reason});const patch={last_run_at:now.toISOString(),last_status:"error",last_error:reason};source==="task"?await updateScheduledTask(this.opts.db,id,patch).catch(()=>undefined):await updateUserSubscription(this.opts.db,id,patch).catch(()=>undefined);this.opts.log?.(`[schedule] ${source}=${id} failed`,e);return {sent:false,reason};}}
+  async tick(now=new Date()){
+    if(this.stopped||this.running)return {sent:0,skipped:0};
+    this.running=true;
+    let sent=0,skipped=0;
+    const delivered=new Set<string>();
+    try {
+      const [tasks,subs]=await Promise.all([listScheduledTasks(this.opts.db),listUserSubscriptions(this.opts.db)]);
+      for(const task of tasks){
+        const oneTime=task.schedule_type==="one_time";
+        const executeAt=task.execute_at?new Date(task.execute_at):null;
+        const due=task.enabled&&(oneTime?Boolean(executeAt&&executeAt.getTime()<=now.getTime()&&!task.last_run_at):cronMatches(task.schedule,now,task.timezone));
+        if(!oneTime&&(!task.next_run_at||due))await updateScheduledTask(this.opts.db,task.id,{next_run_at:nextCronRun(task.schedule,task.timezone,now)});
+        if(!due)continue;
+        const result=await this.run("task",task.id,task.bot_id,task.peer_id,task.persona_id,task.prompt,Boolean(task.web_search_enabled),now,"task",now,task.timezone);
+        if(result.sent){
+          sent++;
+          delivered.add(this.peerKey(task.bot_id,task.peer_id));
+          if(oneTime)await updateScheduledTask(this.opts.db,task.id,{enabled:0,next_run_at:null});
+        } else skipped++;
+      }
+      for(const sub of subs){
+        if(!(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub)))continue;
+        const service=await getSystemSubscriptionService(this.opts.db,sub.service_id);
+        if(!service?.enabled||!(await isServiceOpenToPersona(this.opts.db,service.id,sub.persona_id)))continue;
+        const due=cronMatches(service.schedule,now,service.timezone);
+        if(!sub.next_run_at||due)await updateUserSubscription(this.opts.db,sub.id,{next_run_at:nextCronRun(service.schedule,service.timezone,now)});
+        if(!due)continue;
+        const resolved=resolveScheduledParams(sub.params,service.params_schema);
+        const prompt=interpolate(service.prompt_template,resolved.params);
+        const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,"subscription",now,service.timezone,undefined,locationHintFromParams(resolved.params));
+        if(result.sent){
+          sent++;
+          delivered.add(this.peerKey(sub.bot_id,sub.peer_id));
+        } else skipped++;
+      }
+      await this.scanKeepAlive(now, tasks, subs, delivered);
+    } finally {this.running=false;}
+    return {sent,skipped};
+  }
+  private async run(source:"task"|"subscription",id:string,botId:string,peerId:string,personaId:string,prompt:string,web:boolean,now:Date,lockSource:string=source,executionTime:Date=now,timeZone="Asia/Shanghai",onProgress?:ScheduledTestProgressHandler,locationHint?:string):Promise<{sent:true}|{sent:false;reason:string}>{
+    const key=minuteKey(now);
+    onProgress?.({level:"info",stage:"lock",message:"正在获取执行锁"});
+    if(!(await tryAcquireScheduledExecutionLock(this.opts.db,lockSource,id,key,this.opts.lockTtlSec))){
+      onProgress?.({level:"warn",stage:"lock",message:"本分钟已有相同执行，去重锁拒绝"});
+      return {sent:false,reason:"duplicate_execution_lock"};
+    }
+    let generated:InboundChatResult|null=null;
+    try{
+      onProgress?.({level:"info",stage:"context",message:"正在读取会话上下文"});
+      const info=await getContextTokenInfo(this.opts.db,botId,peerId);
+      const tok=info?.token;
+      if(!tok)throw new Error("no_context_token");
+      onProgress?.({level:"info",stage:"context",message:`已找到会话令牌（${tok.length} 字符）`});
+      const askKeepAliveReply=shouldPiggybackKeepAlive(info.inboundAt,this.keepAlivePolicy(),now);
+      const r=await this.opts.chat.handleScheduled({
+        botAccountId:botId,peerId,contextToken:tok,personaId,prompt,webSearchEnabled:web,source,
+        executionTime:executionTime.toISOString(),timeZone,locationHint,askKeepAliveReply,
+        onProgress:event=>onProgress?.({level:"info",stage:event.stage,message:event.message}),
+      });
+      if(r.kind!=="reply"||!r.text)throw new Error(r.skipReason||r.kind);
+      generated=r;
+      onProgress?.({level:"info",stage:"delivery",message:"内容生成成功，正在发送到微信"});
+      const out=await this.opts.sendReply(botId,peerId,r);
+      if(!out.ok){
+        const sendReason=out.error?`${out.reason}: ${out.error}`:(out.reason||"send_failed");
+        throw new Error(sendReason);
+      }
+      const patch={last_run_at:now.toISOString(),last_status:"sent",last_error:null};
+      source==="task"?await updateScheduledTask(this.opts.db,id,patch):await updateUserSubscription(this.opts.db,id,patch);
+      if(askKeepAliveReply){
+        await markPeerKeepAlive(this.opts.db,botId,peerId,{sent:true}).catch(()=>undefined);
+      }
+      return {sent:true};
+    }catch(e){
+      const reason=e instanceof Error?e.message:String(e);
+      if(generated?.bubbles?.length && isStaleKeepAliveError(reason)){
+        await saveScheduledOutbox(this.opts.db,{
+          botId,peerId,source,id,texts:generated.bubbles,
+        }).catch(()=>undefined);
+        onProgress?.({level:"warn",stage:"error",message:"会话令牌可能失效，已排队等用户开口补发"});
+        const patch={last_run_at:now.toISOString(),last_status:"error",last_error:"queued_until_inbound"};
+        source==="task"?await updateScheduledTask(this.opts.db,id,patch).catch(()=>undefined):await updateUserSubscription(this.opts.db,id,patch).catch(()=>undefined);
+        this.opts.log?.(`[schedule] ${source}=${id} queued until inbound`,e);
+        return {sent:false,reason:"queued_until_inbound"};
+      }
+      onProgress?.({level:"error",stage:"error",message:reason});
+      const patch={last_run_at:now.toISOString(),last_status:"error",last_error:reason};
+      source==="task"?await updateScheduledTask(this.opts.db,id,patch).catch(()=>undefined):await updateUserSubscription(this.opts.db,id,patch).catch(()=>undefined);
+      this.opts.log?.(`[schedule] ${source}=${id} failed`,e);
+      return {sent:false,reason};
+    }
+  }
+  private soonerIso(a?: string | null, b?: string | null): string | null {
+    const ta = a ? Date.parse(a) : NaN;
+    const tb = b ? Date.parse(b) : NaN;
+    if (Number.isFinite(ta) && Number.isFinite(tb)) return ta <= tb ? a! : b!;
+    if (Number.isFinite(ta)) return a!;
+    if (Number.isFinite(tb)) return b!;
+    return null;
+  }
+  private async scanKeepAlive(
+    now: Date,
+    tasks: ScheduledTask[],
+    subs: UserSubscription[],
+    delivered: Set<string>,
+  ): Promise<void> {
+    const cfg = this.keepAliveConfig();
+    const sendKeepAlive = this.opts.sendKeepAlive;
+    if (!cfg.enabled || !sendKeepAlive) return;
+    const policy = this.keepAlivePolicy();
+    const candidates = new Map<string, { botId: string; peerId: string; nextScheduledAt: string | null }>();
+    const bump = (botId: string, peerId: string, nextAt: string | null) => {
+      const key = this.peerKey(botId, peerId);
+      const existing = candidates.get(key);
+      if (existing) {
+        existing.nextScheduledAt = this.soonerIso(existing.nextScheduledAt, nextAt);
+        return;
+      }
+      candidates.set(key, { botId, peerId, nextScheduledAt: nextAt });
+    };
+    for (const task of tasks) {
+      if (!task.enabled) continue;
+      const next =
+        task.schedule_type === "one_time"
+          ? task.execute_at ?? null
+          : task.next_run_at || nextCronRun(task.schedule, task.timezone, now);
+      bump(task.bot_id, task.peer_id, next);
+    }
+    for (const sub of subs) {
+      if (!(await isUserSubscriptionActiveForCurrentPersona(this.opts.db, sub))) continue;
+      const service = await getSystemSubscriptionService(this.opts.db, sub.service_id);
+      if (!service?.enabled || !(await isServiceOpenToPersona(this.opts.db, service.id, sub.persona_id))) continue;
+      const next = sub.next_run_at || nextCronRun(service.schedule, service.timezone, now);
+      bump(sub.bot_id, sub.peer_id, next);
+    }
+    let processed = 0;
+    for (const cand of candidates.values()) {
+      if (processed >= cfg.maxPerScan) break;
+      if (delivered.has(this.peerKey(cand.botId, cand.peerId))) continue;
+      const info = await getContextTokenInfo(this.opts.db, cand.botId, cand.peerId);
+      const peer = await ensurePeer(this.opts.db, cand.botId, cand.peerId);
+      const elig = isKeepAliveEligible({
+        hasToken: Boolean(info?.token),
+        inboundAt: info?.inboundAt,
+        lastKeepAliveAt: peer.last_keep_alive_at,
+        lastKeepAliveError: peer.last_keep_alive_error,
+        nextScheduledAt: cand.nextScheduledAt,
+        now,
+        policy,
+      });
+      if (!elig.ok) continue;
+      const locked = await tryAcquireKeepAliveLock(
+        this.opts.db,
+        cand.botId,
+        cand.peerId,
+        cfg.lockTtlSec,
+      );
+      if (!locked) continue;
+      processed++;
+      try {
+        const tok = info!.token;
+        const result = await this.opts.chat.handleKeepAlive({
+          botAccountId: cand.botId,
+          peerId: cand.peerId,
+          contextToken: tok,
+          inboundHours: elig.inboundHours,
+        });
+        if (result.kind !== "reply" || !result.text) {
+          this.opts.log?.(
+            `[keepalive] skip bot=${cand.botId} peer=${cand.peerId} reason=${result.skipReason ?? result.kind}`,
+          );
+          continue;
+        }
+        const out = await sendKeepAlive(cand.botId, cand.peerId, result.text);
+        if (out.ok) {
+          await markPeerKeepAlive(this.opts.db, cand.botId, cand.peerId, { sent: true });
+          this.opts.log?.(`[keepalive] sent bot=${cand.botId} peer=${cand.peerId}`);
+          continue;
+        }
+        const sendReason = out.error ? `${out.reason}: ${out.error}` : (out.reason || "send_failed");
+        await markPeerKeepAlive(this.opts.db, cand.botId, cand.peerId, {
+          sent: false,
+          error: isStaleKeepAliveError(sendReason) ? sendReason : null,
+        });
+        this.opts.log?.(
+          `[keepalive] send failed bot=${cand.botId} peer=${cand.peerId}: ${sendReason}`,
+        );
+      } catch (err) {
+        this.opts.log?.(
+          `[keepalive] error bot=${cand.botId} peer=${cand.peerId}`,
+          err,
+        );
+      } finally {
+        await releaseKeepAliveLock(this.opts.db, cand.botId, cand.peerId).catch(() => undefined);
+      }
+    }
+  }
 }

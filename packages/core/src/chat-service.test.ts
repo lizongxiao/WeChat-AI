@@ -274,6 +274,60 @@ describe("ChatService multi-user isolation (Redis)", () => {
     await db.close();
   });
 
+  it("handleKeepAlive stores one short assistant sentence", async (t) => {
+    let db;
+    try {
+      db = openDatabase(redisUrl);
+      await Promise.race([
+        db.ping(),
+        new Promise((_, rej) =>
+          setTimeout(() => rej(new Error("timeout")), 2500),
+        ),
+      ]);
+    } catch {
+      try {
+        await db?.close();
+      } catch {
+        /* ignore */
+      }
+      t.skip("Redis not available");
+      return;
+    }
+    await seedPersonas(db);
+    const cat = (await getPersonaBySlug(db, "catgirl"))!;
+    const botId = `bot_keepalive_${Date.now()}`;
+    await upsertBotAccount(db, {
+      id: botId,
+      ownerUserId: "u_test",
+      displayName: "test",
+      botToken: "test-token",
+    });
+    await approvePeer(db, botId, "user_k@im.wechat");
+    await setAssignment(db, botId, "user_k@im.wechat", cat.id);
+
+    const fake = new FakeLlm("在吗？回我一句就好。后面这些不该发出去。");
+    const chat = new ChatService(db, asLlm(fake), {
+      allowUnapproved: false,
+      memoryExtractEveryN: 999,
+      replyFilterEnabled: false,
+      stickersEnabled: false,
+    });
+    const r = await chat.handleKeepAlive({
+      botAccountId: botId,
+      peerId: "user_k@im.wechat",
+      contextToken: "tok-k",
+      inboundHours: 20,
+    });
+    assert.equal(r.kind, "reply");
+    assert.equal(r.text, "在吗？");
+    assert.equal(r.bubbles?.length, 1);
+    const hist = await listRecentMessages(db, botId, "user_k@im.wechat", 20);
+    assert.equal(hist.length, 1);
+    assert.equal(hist[0]?.role, "assistant");
+    assert.equal(hist[0]?.content, "在吗？");
+    await db.close();
+  });
+
   it("handleInbound single-pass parses primary multi-bubble JSON (filter off)", async (t) => {
     let db;
     try {
@@ -397,5 +451,42 @@ describe("ChatService multi-user isolation (Redis)", () => {
     assert.match(blocked.skipReason??"",/^web_search_failed:/);
     assert.equal(missing.kind,"reply");
     assert.match(fallbackQuery,/深圳.*天气/);
+  });
+
+  it("corrects a wrong weekday in a weather bulletin before send", async (t) => {
+    let db;
+    try { db = openDatabase(redisUrl); await Promise.race([db.ping(), new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2500))]); }
+    catch { try { await db?.close(); } catch {} t.skip("Redis not available"); return; }
+    await seedPersonas(db);
+    const cat = await getPersonaBySlug(db, "catgirl");
+    assert.ok(cat);
+    const botId=`bot_scheduled_weekday_${Date.now()}`; const peerId="scheduled_weekday_peer@im.wechat";
+    await upsertBotAccount(db,{id:botId,ownerUserId:"u_test",displayName:"test",botToken:"test-token"});
+    await approvePeer(db,botId,peerId);
+    const fake=new FakeLlm(`早上好。
+
+🌤️ 深圳今日天气｜8月13日 周三
+🌡️ 温度：28℃ ～ 34℃
+☁️ 天气：多云间晴
+🌧️ 降雨：午后有短时阵雨
+💨 风力：西南风 2～3 级
+👕 穿衣：短袖短裤就够。
+☂️ 出行：午后带伞。`);
+    const chat=new ChatService(db,asLlm(fake),{allowUnapproved:false,memoryExtractEveryN:999,stickersEnabled:false});
+    const result=await chat.handleScheduled({
+      botAccountId:botId,
+      peerId,
+      contextToken:"tok",
+      personaId:cat!.id,
+      prompt:"🌤️ 今日天气｜{日期}\n🌡️ 温度\n☁️ 天气\n🌧️ 降雨\n💨 风力\n👕 穿衣\n☂️ 出行",
+      webSearchEnabled:false,
+      executionTime:"2026-08-13T01:00:00.000Z",
+      timeZone:"Asia/Shanghai",
+    });
+    await db.close();
+    assert.equal(result.kind,"reply", result.skipReason);
+    assert.match(result.text??"", /8月13日 周四/);
+    assert.doesNotMatch(result.text??"", /8月13日 周三/);
+    assert.match(JSON.stringify(fake.lastMessages), /2026-08-13 09:00 周四/);
   });
 });

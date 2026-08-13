@@ -8602,11 +8602,12 @@
         if (raw.startsWith("web_search_failed:")) return `联网查询失败（${raw.slice(18)}）`;
         if (raw.startsWith("ilink_error")) {
           if (/ret=-2|prepare failed|errcode=-14|ret=-14/.test(raw)) {
-            return `微信拒绝了当前会话令牌（${raw.replace(/^ilink_error:?\s*/, "")}）。请让该用户再发一条新消息（不要重复同一句），等机器人正常回复后再立即重试。`;
+            return `会话令牌可能失效（${raw.replace(/^ilink_error:?\s*/, "")}），已排队等用户开口补发。请让该用户再发一条新消息。`;
           }
           return `微信发送失败（${raw.replace(/^ilink_error:?\s*/, "") || "接口错误"}）`;
         }
         return {
+          queued_until_inbound: "会话令牌可能失效，已排队等用户开口补发",
           duplicate_execution_lock: "本分钟已推送过一次，请稍后再试",
           web_search_unavailable: "联网搜索未启用或工具网关不可用",
           web_search_not_performed: "模型没有真正联网查询，已拦截以免编造",

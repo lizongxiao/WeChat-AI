@@ -39,11 +39,16 @@ import {
   parseFactsJson,
   parseProactiveSkip,
   normalizeScheduledLayout,
+  correctScheduledWeekday,
   scheduledOutputIssues,
   buildScheduledRepairUserMessage,
   splitScheduledBulletin,
   type PromptAttachment,
 } from "./prompt.js";
+import {
+  buildKeepAliveMessages,
+  firstKeepAliveSentence,
+} from "./keep-alive.js";
 import {
   parseMultiBubbleReply,
   type ReplyPart,
@@ -142,6 +147,13 @@ export interface ProactiveChatRequest {
   /** Approximate idle hours for prompt (from scheduler) */
   idleHours: number;
 }
+export interface KeepAliveChatRequest {
+  botAccountId: string;
+  peerId: string;
+  contextToken: string;
+  inboundHours?: number;
+}
+
 /** A scheduler-only turn. The caller supplies the persisted task instruction;
  * this API deliberately never writes schedules or parses confirmations. */
 export interface ScheduledChatRequest {
@@ -158,6 +170,8 @@ export interface ScheduledChatRequest {
   timeZone?: string;
   /** Preferred weather city from subscription params (e.g. location / city). */
   locationHint?: string;
+  /** Close the bulletin by asking the user to reply (token keep-alive). */
+  askKeepAliveReply?: boolean;
   onProgress?: (event: {
     stage: "web_search" | "generation" | "validation";
     message: string;
@@ -1160,6 +1174,7 @@ export class ChatService {
       webSearchRequired: req.webSearchEnabled,
       webSearchContext,
       trustedInstruction: req.source === "subscription",
+      askKeepAliveReply: req.askKeepAliveReply === true,
     });
     const { client, callOpts } = await this.resolveChatClient({
       persona,
@@ -1175,10 +1190,16 @@ export class ChatService {
     callOpts.maxToolRounds = 0;
     callOpts.maxTokens = SCHEDULED_MAX_TOKENS;
     req.onProgress?.({ stage: "generation", message: "开始生成定时消息" });
+    const finalizeText = (text: string) =>
+      correctScheduledWeekday(
+        normalizeScheduledLayout(text),
+        executionTime,
+        timeZone,
+      );
     let usage = await client.chatWithUsage(messages, callOpts);
     usage = {
       ...usage,
-      text: normalizeScheduledLayout(usage.text),
+      text: finalizeText(usage.text),
     };
     const previewText = (text: string) =>
       text.replace(/\s+/g, " ").trim().slice(0, 96);
@@ -1209,7 +1230,7 @@ export class ChatService {
       const retry = await client.chatWithUsage(retryMessages, repairOpts);
       usage = {
         ...retry,
-        text: normalizeScheduledLayout(retry.text),
+        text: finalizeText(retry.text),
         promptTokens: usage.promptTokens + retry.promptTokens,
         completionTokens: usage.completionTokens + retry.completionTokens,
         totalTokens: usage.totalTokens + retry.totalTokens,
@@ -1235,12 +1256,100 @@ export class ChatService {
     // Do not run the ordinary multi-bubble / reply-filter pipeline: it caps at
     // five parts and can flatten the weather layout. Pack into ≤3 newline-free
     // bubbles — iLink rejects in-message `\n`, and per-line sends hit rate limits.
-    const deliveryText = normalizeScheduledLayout(usage.text);
+    const deliveryText = finalizeText(usage.text);
     if (!deliveryText.trim()) return { kind: "skip", skipReason: "empty_reply" };
     const bubbles = splitScheduledBulletin(deliveryText);
     const parts = bubbles.map((t) => ({ kind: "text" as const, text: t }));
     await insertMessage(this.db, { botAccountId:req.botAccountId, peerId:req.peerId, personaId:persona.id, role:"assistant", content:deliveryText, contextToken:req.contextToken });
     return { kind:"reply", text:deliveryText, bubbles, parts, bubblesFromJson:false, personaId:persona.id, personaSlug:persona.slug, ownerUserId:bot?.owner_user_id };
+  }
+
+  /**
+   * One-sentence keep-alive ping so a scheduled subscriber replies and
+   * refreshes iLink context_token. Isolated from chat history.
+   */
+  async handleKeepAlive(req: KeepAliveChatRequest): Promise<InboundChatResult> {
+    const peer = await ensurePeer(this.db, req.botAccountId, req.peerId);
+    if (!peer.approved && !this.opts.allowUnapproved) {
+      return { kind: "reject", text: this.opts.unapprovedReply };
+    }
+    const persona = await resolvePersonaForPeer(
+      this.db,
+      req.botAccountId,
+      req.peerId,
+    );
+    if (!persona) {
+      return { kind: "reject", text: this.opts.noPersonaReply };
+    }
+    if (persona.mode === "chatflow") {
+      return { kind: "skip", skipReason: "chatflow_unsupported" };
+    }
+    const [systemPrompt, bot, memories] = await Promise.all([
+      getPublishedPrompt(this.db, persona.id),
+      getBotAccount(this.db, req.botAccountId),
+      listMemories(this.db, req.botAccountId, req.peerId, persona.id),
+    ]);
+    if (!systemPrompt) {
+      return { kind: "skip", skipReason: "persona_prompt_missing" };
+    }
+    const botName = bot?.display_name?.trim() || "助手";
+    const selectedMemories = selectMemoriesForPrompt(
+      memories,
+      "保活提醒",
+      {
+        topK: this.opts.memoryTopK,
+        fullInjectMax: this.opts.memoryFullInjectMax,
+      },
+    );
+    const messages = buildKeepAliveMessages({
+      systemPrompt,
+      memories: selectedMemories,
+      botName,
+      personaName: persona.display_name,
+      inboundHours: req.inboundHours,
+    });
+    const { client, callOpts } = await this.resolveChatClient({
+      persona,
+      ownerUserId: bot?.owner_user_id,
+      includeTimeTool: false,
+    });
+    callOpts.tools = [];
+    callOpts.webSearch = undefined;
+    callOpts.requireToolUse = false;
+    callOpts.maxToolRounds = 0;
+    callOpts.maxTokens = 120;
+    const usage = await client.chatWithUsage(messages, callOpts);
+    const owner = bot?.owner_user_id
+      ? await getUser(this.db, bot.owner_user_id)
+      : undefined;
+    await recordTokenUsage(this.db, {
+      userId: bot?.owner_user_id,
+      botId: req.botAccountId,
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      username: owner?.username,
+      botName: bot?.display_name,
+    });
+    const text = firstKeepAliveSentence(usage.text);
+    if (!text) return { kind: "skip", skipReason: "empty_reply" };
+    await insertMessage(this.db, {
+      botAccountId: req.botAccountId,
+      peerId: req.peerId,
+      personaId: persona.id,
+      role: "assistant",
+      content: text,
+      contextToken: req.contextToken,
+    });
+    return {
+      kind: "reply",
+      text,
+      bubbles: [text],
+      parts: [{ kind: "text", text }],
+      bubblesFromJson: false,
+      personaId: persona.id,
+      personaSlug: persona.slug,
+      ownerUserId: bot?.owner_user_id,
+    };
   }
 
   async extractMemory(

@@ -209,6 +209,14 @@ export interface AppConfig {
   proactiveMaxPerScan: number;
   proactiveLockTtlSec: number;
   proactiveAttemptCooldownHours: number;
+  /** Session keep-alive for users with enabled scheduled subscriptions/tasks */
+  keepAliveEnabled: boolean;
+  keepAliveAfterHours: number;
+  keepAliveMaxHours: number;
+  keepAliveMinIntervalHours: number;
+  keepAliveQuietHours: string;
+  keepAliveMaxPerScan: number;
+  keepAliveDueSoonHours: number;
   /** Memory: top-K when over fullInjectMax */
   memoryTopK: number;
   /** Memory: inject all when count ≤ this */
@@ -400,6 +408,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     proactiveAttemptCooldownHours: Number(
       env.PROACTIVE_ATTEMPT_COOLDOWN_HOURS ?? "1",
     ),
+    keepAliveEnabled: env.KEEP_ALIVE_ENABLED !== "false",
+    keepAliveAfterHours: Number(env.KEEP_ALIVE_AFTER_HOURS ?? "18"),
+    keepAliveMaxHours: Number(env.KEEP_ALIVE_MAX_HOURS ?? "40"),
+    keepAliveMinIntervalHours: Number(
+      env.KEEP_ALIVE_MIN_INTERVAL_HOURS ?? "20",
+    ),
+    keepAliveQuietHours:
+      env.KEEP_ALIVE_QUIET_HOURS === undefined
+        ? "22-8"
+        : String(env.KEEP_ALIVE_QUIET_HOURS).trim(),
+    keepAliveMaxPerScan: Number(env.KEEP_ALIVE_MAX_PER_SCAN ?? "10"),
+    keepAliveDueSoonHours: Number(env.KEEP_ALIVE_DUE_SOON_HOURS ?? "2"),
     memoryTopK: Number(env.MEMORY_TOP_K ?? "12"),
     memoryFullInjectMax: Number(env.MEMORY_FULL_INJECT_MAX ?? "20"),
     memoryMaxItems: Number(env.MEMORY_MAX_ITEMS ?? "100"),

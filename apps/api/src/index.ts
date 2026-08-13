@@ -260,6 +260,17 @@ async function main(): Promise<void> {
       lockTtlSec: cfg.proactiveLockTtlSec,
       attemptCooldownHours: cfg.proactiveAttemptCooldownHours,
     },
+    keepAlive: {
+      enabled: cfg.keepAliveEnabled,
+      afterHours: cfg.keepAliveAfterHours,
+      maxHours: cfg.keepAliveMaxHours,
+      minIntervalHours: cfg.keepAliveMinIntervalHours,
+      quietHours: cfg.keepAliveQuietHours,
+      quietTimeZone: cfg.timeToolTimeZone || "Asia/Shanghai",
+      dueSoonHours: cfg.keepAliveDueSoonHours,
+      maxPerScan: cfg.keepAliveMaxPerScan,
+      lockTtlSec: 180,
+    },
     broadcast: {
       intervalMs: cfg.broadcastIntervalMs,
       pollIntervalMs: 2_000,

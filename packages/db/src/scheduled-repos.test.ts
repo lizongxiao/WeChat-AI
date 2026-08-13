@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { subscriptionMatchesCurrentPersona, validateSubscriptionParams } from "./scheduled-repos.js";
 import { openDatabase } from "./client.js";
-import { createScheduledTask, listPeerScheduledTasks } from "./scheduled-repos.js";
+import { subscriptionMatchesCurrentPersona, validateSubscriptionParams, createScheduledTask, listPeerScheduledTasks, saveScheduledOutbox, takeScheduledOutbox } from "./scheduled-repos.js";
 
 describe("subscription parameter validation", () => {
   const schema = {
@@ -35,6 +34,43 @@ describe("scheduled task peer isolation (Redis)", () => {
     await createScheduledTask(db,{user_id:"same-account",bot_id:botId,peer_id:"peer-b",persona_id:"persona-b",name:"B only",prompt:"B",schedule:"0 9 * * *",timezone:"Asia/Shanghai",web_search_enabled:0,enabled:1});
     const a=await listPeerScheduledTasks(db,botId,"peer-a");
     assert.deepEqual(a.map(x=>x.name),["A only"]);
+    await db.close();
+  });
+});
+
+describe("scheduled outbox (Redis)", () => {
+  it("keeps only the latest bulletin per peer and take() consumes it", async (t) => {
+    const db = openDatabase(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
+    try {
+      await Promise.race([
+        db.ping(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2500)),
+      ]);
+    } catch {
+      await db.close().catch(() => undefined);
+      t.skip("Redis not available");
+      return;
+    }
+    const botId = `outbox_${Date.now()}`;
+    const peerId = "peer-outbox";
+    await saveScheduledOutbox(db, {
+      botId,
+      peerId,
+      source: "subscription",
+      id: "old",
+      texts: ["旧的天气"],
+    });
+    await saveScheduledOutbox(db, {
+      botId,
+      peerId,
+      source: "subscription",
+      id: "new",
+      texts: ["早上好", "深圳多云"],
+    });
+    const item = await takeScheduledOutbox(db, botId, peerId);
+    assert.equal(item?.id, "new");
+    assert.deepEqual(item?.texts, ["早上好", "深圳多云"]);
+    assert.equal(await takeScheduledOutbox(db, botId, peerId), null);
     await db.close();
   });
 });

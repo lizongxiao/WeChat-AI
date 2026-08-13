@@ -110,6 +110,10 @@ describe("shipped defaults: other optional features stay off", () => {
     assert.equal(bare().proactiveEnabled, false);
   });
 
+  it("session keep-alive for scheduled subscribers is on", () => {
+    assert.equal(bare().keepAliveEnabled, true);
+  });
+
   it("web search is off", () => {
     assert.equal(bare().webSearchEnabled, false);
   });

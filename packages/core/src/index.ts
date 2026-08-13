@@ -4,6 +4,7 @@ export {
   type InboundChatRequest,
   type InboundChatResult,
   type ProactiveChatRequest,
+  type KeepAliveChatRequest,
 } from "./chat-service.js";
 export {
   applyPromptTemplate,
@@ -19,6 +20,7 @@ export {
   describeAttachments,
   BOT_NAME_VARS,
   normalizeScheduledLayout,
+  correctScheduledWeekday,
   parseFactsJson,
   parseProactiveSkip,
   MAX_SCHEDULED_BUBBLES,
@@ -38,6 +40,18 @@ export {
   type ProactivePolicy,
   type ProactiveSkipReason,
 } from "./proactive.js";
+export {
+  DEFAULT_KEEP_ALIVE_POLICY,
+  attachMissedDeliveryNotice,
+  buildKeepAliveMessages,
+  firstKeepAliveSentence,
+  hoursSince,
+  isKeepAliveEligible,
+  isStaleKeepAliveError,
+  shouldPiggybackKeepAlive,
+  type KeepAlivePolicy,
+  type KeepAliveSkipReason,
+} from "./keep-alive.js";
 export {
   splitReplyIntoBubbles,
   humanDelayMs,

@@ -370,19 +370,89 @@ export function buildChatMessages(params: {
   return messages;
 }
 
-function formatScheduledExecutionTime(iso: string, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
+const EN_WEEKDAY_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
+const ZH_WEEKDAY_CHAR = ["日", "一", "二", "三", "四", "五", "六"] as const;
+
+function partValue(parts: Intl.DateTimeFormatPart[], type: string): string {
+  return parts.find((part) => part.type === type)?.value ?? "";
+}
+
+function scheduledClock(iso: string, timeZone: string) {
+  const date = new Date(iso);
+  // Date + weekday without hour, so ICU's hour:"24" midnight quirk cannot
+  // shift the calendar day independently of the weekday.
+  const dateParts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    weekday: "short",
+  }).formatToParts(date);
+  const timeParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-  }).formatToParts(new Date(iso));
-  const value = (type: string) =>
-    parts.find((part) => part.type === type)?.value ?? "";
-  return `${value("year")}-${value("month")}-${value("day")} ${value("hour")}:${value("minute")}`;
+  }).formatToParts(date);
+  const week = EN_WEEKDAY_INDEX[partValue(dateParts, "weekday")];
+  const weekdayChar = week === undefined ? "" : ZH_WEEKDAY_CHAR[week]!;
+  const month = partValue(dateParts, "month");
+  const day = partValue(dateParts, "day");
+  let hour = partValue(timeParts, "hour");
+  if (hour === "24") hour = "00";
+  return {
+    year: partValue(dateParts, "year"),
+    month,
+    day,
+    monthNum: String(Number(month) || month),
+    dayNum: String(Number(day) || day),
+    hour,
+    minute: partValue(timeParts, "minute"),
+    weekdayChar,
+    weekdayShort: weekdayChar ? `周${weekdayChar}` : "",
+  };
+}
+
+function formatScheduledExecutionTime(iso: string, timeZone: string): string {
+  const c = scheduledClock(iso, timeZone);
+  const stamp = `${c.year}-${c.month}-${c.day} ${c.hour}:${c.minute}`;
+  return c.weekdayShort ? `${stamp} ${c.weekdayShort}` : stamp;
+}
+
+function formatScheduledDateLabel(iso: string, timeZone: string): string {
+  const c = scheduledClock(iso, timeZone);
+  const date = `${c.monthNum}月${c.dayNum}日`;
+  return c.weekdayShort ? `${date} ${c.weekdayShort}` : date;
+}
+
+/**
+ * Models often copy last year's weekday (2025-08-13 was Wednesday) or a stale
+ * search snippet. Rewrite 周X / 星期X only when it sits next to today's date.
+ */
+export function correctScheduledWeekday(
+  text: string,
+  iso: string,
+  timeZone: string,
+): string {
+  const c = scheduledClock(iso, timeZone);
+  if (!c.weekdayChar || !c.monthNum || !c.dayNum) return text;
+  const datePat = `(?:${c.year}年)?0?${c.monthNum}月0?${c.dayNum}日`;
+  return text.replace(
+    new RegExp(
+      `(${datePat})([（(，,、\\s]*)(星期|周|礼拜)([一二三四五六日天])([)）]?)`,
+      "gu",
+    ),
+    (_m, date: string, sep: string, kind: string, _old: string, close: string) =>
+      `${date}${sep}${kind}${c.weekdayChar}${close}`,
+  );
 }
 
 /**
@@ -403,6 +473,8 @@ export function buildScheduledMessages(params: {
   /** Search results fetched by the server before invoking the Persona model. */
   webSearchContext?: string;
   trustedInstruction?: boolean;
+  /** When the inbound token is aging, close by asking the user to reply. */
+  askKeepAliveReply?: boolean;
 }): ChatMessage[] {
   const botName = params.botName?.trim() || "助手";
   const identity = buildBotIdentityBlock(
@@ -410,17 +482,33 @@ export function buildScheduledMessages(params: {
   );
   const personaBody = applyPromptTemplate(params.systemPrompt, { botName });
   const memoryBlock = buildMemoryBlock(params.memories);
+  const clock = scheduledClock(params.executionTime, params.timeZone);
   const executionTime = formatScheduledExecutionTime(
     params.executionTime,
     params.timeZone,
   );
+  const dateLabel = formatScheduledDateLabel(
+    params.executionTime,
+    params.timeZone,
+  );
+  const scheduledPrompt = params.scheduledPrompt.replace(
+    /\{日期\}/g,
+    dateLabel,
+  );
+  const weekdayLine = clock.weekdayShort
+    ? `今天是${clock.weekdayShort}。日期行写成「${dateLabel}」。搜索结果里的星期可能过期，禁止自行推算或沿用错误星期。`
+    : "";
   const executionBlock = [
     "## 定时任务执行规则",
-    `本次任务的业务执行时间是 ${executionTime}（${params.timeZone}）。所有“今天、早上、晚上、日期”等相对时间，以及问候语，均以此时间为准。`,
+    `本次任务的业务执行时间是 ${executionTime}（${params.timeZone}）。所有“今天、早上、晚上、日期、星期”等相对时间，以及问候语，均以此时间为准。`,
+    weekdayLine,
     "若执行时间不在早晨，不要机械说“早上好”；按该时刻自然问候（例如晚上用晚上好/夜里好）。",
     "这是独立的定时推送，不是在续接最近一轮聊天。",
     "任务内容与格式要求优先于 Persona；Persona 只决定措辞、语气和称呼，不得删减任务要求的栏目。",
     "若任务要求保留换行或多栏目结构，输出中每个栏目（如 🌤️ / 🌡️ / 今日寄语）必须单独成行，禁止把整段挤成一行。",
+    params.askKeepAliveReply
+      ? "收尾必须自然请对方回一句（不要提 token、系统、会话），控制在一句话。"
+      : "",
     params.webSearchRequired && params.webSearchContext
       ? `本任务要求实时信息，服务端已完成联网查询。只能依据下方搜索结果填写实时数据；搜索结果未覆盖的字段要明确说明未知，不得凭记忆编造。\n\n## 联网查询结果\n${params.webSearchContext}`
       : params.webSearchRequired
@@ -430,7 +518,7 @@ export function buildScheduledMessages(params: {
     .filter(Boolean)
     .join("\n");
   const trustedTaskBlock = params.trustedInstruction
-    ? `## 必须执行的系统订阅任务\n${params.scheduledPrompt.trim()}`
+    ? `## 必须执行的系统订阅任务\n${scheduledPrompt.trim()}`
     : "";
   const system = [
     identity,
@@ -450,7 +538,7 @@ export function buildScheduledMessages(params: {
       : "";
   const userInstruction = params.trustedInstruction
     ? `请现在执行以上系统订阅任务，并直接输出最终发送给用户的完整内容。${checklistBlock}`
-    : `请现在执行这条已确认的定时任务，并直接输出最终发送给用户的完整内容：\n${params.scheduledPrompt.trim()}${checklistBlock}`;
+    : `请现在执行这条已确认的定时任务，并直接输出最终发送给用户的完整内容：\n${scheduledPrompt.trim()}${checklistBlock}`;
   return [
     { role: "system", content: system },
     { role: "user", content: userInstruction },

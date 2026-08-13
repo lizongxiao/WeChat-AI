@@ -270,6 +270,10 @@ export interface Peer {
   last_proactive_at?: string | null;
   /** Last proactive attempt including skip (ISO) — used for scan cooldown. */
   last_proactive_attempt_at?: string | null;
+  /** Last keep-alive ping attempt (ISO). */
+  last_keep_alive_at?: string | null;
+  /** Last keep-alive error (stale session stops further pings until inbound). */
+  last_keep_alive_error?: string | null;
 }
 
 export interface MessageRow {
@@ -2113,6 +2117,66 @@ export async function getContextToken(
   return v && v.trim() ? v : null;
 }
 
+export interface ContextTokenInfo {
+  token: string;
+  inboundAt: string | null;
+}
+
+export async function getContextTokenInfo(
+  db: RedisStore,
+  botAccountId: string,
+  peerId: string,
+): Promise<ContextTokenInfo | null> {
+  const [token, inboundAt] = (await db.redis.mget(
+    K.contextToken(botAccountId, peerId),
+    K.contextTokenAt(botAccountId, peerId),
+  )) as (string | null)[];
+  const tok = token?.trim() || "";
+  if (!tok) return null;
+  const at = inboundAt?.trim() || "";
+  return { token: tok, inboundAt: at || null };
+}
+
+export async function tryAcquireKeepAliveLock(
+  db: RedisStore,
+  botAccountId: string,
+  peerId: string,
+  ttlSec: number,
+): Promise<boolean> {
+  const ok = await db.redis.set(
+    K.keepAliveLock(botAccountId, peerId),
+    "1",
+    "EX",
+    Math.max(30, ttlSec),
+    "NX",
+  );
+  return ok === "OK";
+}
+
+export async function releaseKeepAliveLock(
+  db: RedisStore,
+  botAccountId: string,
+  peerId: string,
+): Promise<void> {
+  await db.del(K.keepAliveLock(botAccountId, peerId));
+}
+
+export async function markPeerKeepAlive(
+  db: RedisStore,
+  botAccountId: string,
+  peerId: string,
+  opts: { sent: boolean; error?: string | null; at?: string },
+): Promise<Peer> {
+  const peer = await ensurePeer(db, botAccountId, peerId);
+  const at = opts.at ?? nowIso();
+  peer.last_keep_alive_at = at;
+  peer.last_keep_alive_error = opts.sent
+    ? null
+    : (opts.error?.trim() || peer.last_keep_alive_error || null);
+  await db.setJson(K.peer(botAccountId, peerId), peer);
+  return peer;
+}
+
 export async function tryAcquireProactiveLock(
   db: RedisStore,
   botAccountId: string,
@@ -2444,7 +2508,11 @@ export async function upsertContextToken(
   peerId: string,
   contextToken: string,
 ): Promise<void> {
-  await db.redis.set(K.contextToken(botAccountId, peerId), contextToken);
+  await db.redis
+    .multi()
+    .set(K.contextToken(botAccountId, peerId), contextToken)
+    .set(K.contextTokenAt(botAccountId, peerId), nowIso())
+    .exec();
 }
 
 export async function listMemories(

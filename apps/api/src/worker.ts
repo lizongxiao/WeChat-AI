@@ -57,6 +57,8 @@ import {
   clearWorkerUpdateJob,
   unregisterWorker,
   upsertContextToken,
+  takeScheduledOutbox,
+  saveScheduledOutbox,
   WORKER_STALE_SEC,
 } from "@wechat-ai/db";
 import { tryApplyOtaUpdate } from "./ota-apply.js";
@@ -66,6 +68,7 @@ import {
   P2PService,
   sanitizePartsStripStickerJson,
   stripAllStickerJson,
+  attachMissedDeliveryNotice,
   type ChatService,
   type InboundChatResult,
   type HumanDelayOptions,
@@ -86,7 +89,7 @@ import {
   BroadcastRunner,
   type AdminSendResult,
 } from "./broadcast-runner.js";
-import { ScheduledScheduler } from "./scheduled-scheduler.js";
+import { ScheduledScheduler, type KeepAliveSchedulerConfig } from "./scheduled-scheduler.js";
 import { handleScheduledChatTool } from "./scheduled-chat-tools.js";
 import { emitActivity, previewText } from "./activity-stream.js";
 import { scheduledReplyParts } from "./scheduled-reply-delivery.js";
@@ -189,6 +192,8 @@ export interface WorkerOptions {
   voiceTranscriptEnabled?: boolean;
   /** Idle-based proactive outreach */
   proactive?: ProactiveWorkerConfig;
+  /** Session keep-alive for scheduled subscribers */
+  keepAlive?: KeepAliveSchedulerConfig;
   /** Admin text broadcast jobs */
   broadcast?: BroadcastWorkerConfig;
   /** User-to-user relay via @LINUX DO username */
@@ -437,6 +442,7 @@ export class BotWorkerManager {
     workerWeightTtlSec?: number;
     inboxMaxLen?: number;
     proactive?: ProactiveWorkerConfig;
+    keepAlive?: KeepAliveSchedulerConfig;
     broadcast?: BroadcastWorkerConfig;
     p2pEnabled?: boolean;
     p2p?: Partial<P2PServiceOptions>;
@@ -544,6 +550,11 @@ export class BotWorkerManager {
         // Booted with proactive off: the scheduler was never constructed.
         this.startProactiveScheduler();
       }
+    }
+
+    if (patch.keepAlive) {
+      this.opts.keepAlive = patch.keepAlive;
+      this.scheduled?.applyRuntimeOptions({ keepAlive: patch.keepAlive });
     }
 
     if (patch.broadcast) {
@@ -925,6 +936,8 @@ export class BotWorkerManager {
       lockTtlSec: 120,
       log: this.opts.log,
       sendReply: (botId, peerId, reply) => this.sendScheduledReply(botId, peerId, reply),
+      sendKeepAlive: (botId, peerId, text) => this.adminSendText(botId, peerId, text),
+      keepAlive: this.opts.keepAlive,
     });
     this.scheduled.start();
   }
@@ -1133,6 +1146,44 @@ export class BotWorkerManager {
       this.opts.log?.(`[worker] scheduled reply failed bot=${botId} peer=${peerId}: ${message}`);
       return { ok: false, reason: "ilink_error", error: message };
     }
+  }
+
+  /**
+   * After inbound refreshed context_token, deliver a bulletin that failed
+   * earlier because the session was stale.
+   */
+  private async flushScheduledOutbox(
+    botId: string,
+    peerId: string,
+  ): Promise<void> {
+    const item = await takeScheduledOutbox(this.opts.db, botId, peerId);
+    if (!item?.texts.length) return;
+    const texts = attachMissedDeliveryNotice(item.texts);
+    const result = await this.sendScheduledReply(botId, peerId, {
+      kind: "reply",
+      text: texts.join(" "),
+      bubbles: texts,
+      parts: texts.map((t) => ({ kind: "text" as const, text: t })),
+    });
+    if (result.ok) {
+      this.opts.log?.(
+        `[worker] scheduled outbox delivered bot=${botId} peer=${peerId} bubbles=${texts.length}`,
+      );
+      return;
+    }
+    await saveScheduledOutbox(this.opts.db, {
+      botId: item.botId,
+      peerId: item.peerId,
+      source: item.source,
+      id: item.id,
+      texts: item.texts,
+      createdAt: item.createdAt,
+    }).catch(() => undefined);
+    this.opts.log?.(
+      `[worker] scheduled outbox requeued bot=${botId} peer=${peerId} reason=${result.reason}${
+        result.error ? ` err=${result.error}` : ""
+      }`,
+    );
   }
 
   /** Serialize work per bot:peer (inbound replies + proactive sends). */
@@ -2283,6 +2334,13 @@ export class BotWorkerManager {
       await this.handleJobInner(job);
     } finally {
       if (client) {
+        await this.flushScheduledOutbox(job.botId, job.peerId).catch((err) => {
+          this.opts.log?.(
+            `[worker] outbox flush failed bot=${job.botId} peer=${job.peerId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
         await client
           .stopTyping({
             toUserId: job.peerId,

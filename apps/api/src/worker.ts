@@ -57,8 +57,7 @@ import {
   clearWorkerUpdateJob,
   unregisterWorker,
   upsertContextToken,
-  takeScheduledOutbox,
-  saveScheduledOutbox,
+  clearScheduledOutbox,
   WORKER_STALE_SEC,
   isSkillEnabled,
   resolvePersonaForPeer,
@@ -70,7 +69,6 @@ import {
   P2PService,
   sanitizePartsStripStickerJson,
   stripAllStickerJson,
-  attachMissedDeliveryNotice,
   CommandRegistry,
   SkillRunner,
   buildHelpCommand,
@@ -1251,44 +1249,6 @@ export class BotWorkerManager {
     }
   }
 
-  /**
-   * After inbound refreshed context_token, deliver a bulletin that failed
-   * earlier because the session was stale.
-   */
-  private async flushScheduledOutbox(
-    botId: string,
-    peerId: string,
-  ): Promise<void> {
-    const item = await takeScheduledOutbox(this.opts.db, botId, peerId);
-    if (!item?.texts.length) return;
-    const texts = attachMissedDeliveryNotice(item.texts);
-    const result = await this.sendScheduledReply(botId, peerId, {
-      kind: "reply",
-      text: texts.join(" "),
-      bubbles: texts,
-      parts: texts.map((t) => ({ kind: "text" as const, text: t })),
-    });
-    if (result.ok) {
-      this.opts.log?.(
-        `[worker] scheduled outbox delivered bot=${botId} peer=${peerId} bubbles=${texts.length}`,
-      );
-      return;
-    }
-    await saveScheduledOutbox(this.opts.db, {
-      botId: item.botId,
-      peerId: item.peerId,
-      source: item.source,
-      id: item.id,
-      texts: item.texts,
-      createdAt: item.createdAt,
-    }).catch(() => undefined);
-    this.opts.log?.(
-      `[worker] scheduled outbox requeued bot=${botId} peer=${peerId} reason=${result.reason}${
-        result.error ? ` err=${result.error}` : ""
-      }`,
-    );
-  }
-
   /** Serialize work per bot:peer (inbound replies + proactive sends). */
   private enqueuePeerChain<T>(
     botId: string,
@@ -2453,13 +2413,9 @@ export class BotWorkerManager {
       await this.handleJobInner(job);
     } finally {
       if (client) {
-        await this.flushScheduledOutbox(job.botId, job.peerId).catch((err) => {
-          this.opts.log?.(
-            `[worker] outbox flush failed bot=${job.botId} peer=${job.peerId}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        });
+        // Failure is terminal by product rule: never replay a stale scheduled
+        // message merely because this inbound refreshed its context token.
+        await clearScheduledOutbox(this.opts.db, job.botId, job.peerId).catch(() => undefined);
         await client
           .stopTyping({
             toUserId: job.peerId,

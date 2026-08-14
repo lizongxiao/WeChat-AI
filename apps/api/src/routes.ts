@@ -174,6 +174,7 @@ import {
   createUserSubscription,
   deleteUserSubscription,
   listUserSubscriptions,
+  listScheduledExecutionLogs,
   listPeerSubscriptions,
   updateUserSubscription,
   getSystemSubscriptionService,
@@ -1723,8 +1724,6 @@ export async function registerRoutes(
     const params = body.params || {};
     const errors = validateSubscriptionParams(service.params_schema, params);
     if (errors.length) return reply.code(400).send({ error: "invalid_service_params", details: errors });
-    const existing = await listPeerSubscriptions(ctx.db, body.botId, body.peerId);
-    if (existing.some((item) => item.service_id === service.id && item.persona_id === persona.id && item.enabled)) return reply.code(409).send({ error: "subscription_already_exists" });
     const bind = await getBindByPeer(ctx.db, body.botId, body.peerId);
     const subscription = await createUserSubscription(ctx.db, { user_id: bind?.userId || `wechat:${body.botId}:${body.peerId}`, bot_id: body.botId, peer_id: body.peerId, persona_id: persona.id, service_id: service.id, params, enabled: 1 });
     await writeAudit(ctx.db, "peer_subscription_created", user.id, { botId: body.botId, peerId: body.peerId, personaId: persona.id, serviceId: service.id, subscriptionId: subscription.id });
@@ -4523,6 +4522,14 @@ export async function registerRoutes(
   app.post<{ Params:{id:string}; Body:{personaId?:string} }>("/api/v1/admin/scheduled-services/:id/test",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const service=await getSystemSubscriptionService(ctx.db,req.params.id);if(!service?.enabled)return reply.code(409).send({error:"service_unavailable"});const personaId=req.body?.personaId;if(personaId&&!(await isServiceOpenToPersona(ctx.db,service.id,personaId)))return reply.code(400).send({error:"persona_not_open_for_service"});try{const run=ctx.worker.startScheduledServiceTest(service.id,personaId);await writeAudit(ctx.db,"scheduled_service_test_started",admin.id,{serviceId:service.id,personaId:personaId||null,runId:run.id});return reply.code(202).send({ok:true,run});}catch(err){return reply.code(500).send({error:err instanceof Error?err.message:String(err)});}});
   app.get<{ Params:{runId:string} }>("/api/v1/admin/scheduled-test-runs/:runId",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const run=ctx.worker.getScheduledServiceTest(req.params.runId);if(!run)return reply.code(404).send({error:"scheduled_test_run_not_found"});return {run};});
   app.get("/api/v1/admin/scheduled-tasks",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const tasks=await listScheduledTasks(ctx.db);return {tasks:tasks.map(({prompt,...safe})=>({...safe,promptSummary:prompt.slice(0,160)}))};});
+  app.get<{ Querystring:{ trigger?:"natural"|"test"; status?:"sent"|"skipped"|"failed"; limit?:string } }>("/api/v1/admin/scheduled-execution-logs",async(req,reply)=>{
+    const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;
+    const q=req.query||{};
+    if(q.trigger && q.trigger!=="natural" && q.trigger!=="test")return reply.code(400).send({error:"invalid_trigger"});
+    if(q.status && !["sent","skipped","failed"].includes(q.status))return reply.code(400).send({error:"invalid_status"});
+    const limit=Number(q.limit);
+    return {logs:await listScheduledExecutionLogs(ctx.db,{trigger:q.trigger,status:q.status,limit:Number.isFinite(limit)?limit:100})};
+  });
   app.get<{ Params:{id:string} }>("/api/v1/admin/scheduled-tasks/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const task=await getScheduledTask(ctx.db,req.params.id);if(!task)return reply.code(404).send({error:"not found"});return {task};});
   app.put<{ Params:{id:string}; Body:{name?:string;prompt?:string;schedule?:string;timezone?:string;webSearchEnabled?:boolean;enabled?:boolean} }>("/api/v1/admin/scheduled-tasks/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const old=await getScheduledTask(ctx.db,req.params.id);if(!old)return reply.code(404).send({error:"not found"});const b=req.body||{};const task=await updateScheduledTask(ctx.db,old.id,{name:b.name?.trim()||old.name,prompt:b.prompt?.trim()||old.prompt,schedule:b.schedule?.trim()||old.schedule,timezone:b.timezone?.trim()||old.timezone,web_search_enabled:b.webSearchEnabled===undefined?old.web_search_enabled:(b.webSearchEnabled?1:0),enabled:b.enabled===undefined?old.enabled:(b.enabled?1:0),next_run_at:null});await writeAudit(ctx.db,"scheduled_task_admin_updated",admin.id,{taskId:task.id});return {task};});
   app.post<{ Params:{id:string}; Body:{enabled?:boolean; delete?:boolean} }>("/api/v1/admin/scheduled-tasks/:id/manage",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const task=await getScheduledTask(ctx.db,req.params.id);if(!task)return reply.code(404).send({error:"not found"});if(req.body?.delete)await deleteScheduledTask(ctx.db,task.id);else await updateScheduledTask(ctx.db,task.id,{enabled:req.body?.enabled?1:0});await writeAudit(ctx.db,"scheduled_task_admin_manage",admin.id,{taskId:task.id});return {ok:true};});

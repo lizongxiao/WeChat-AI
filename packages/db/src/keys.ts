@@ -87,6 +87,8 @@ export const K = {
   /** Latest missed scheduled bulletin, delivered on the next inbound. */
   scheduledOutbox: (botId: string, peerId: string) =>
     `wa:schedule:outbox:${botId}:${peerId}`,
+  /** Capped newest-first JSON list of completed scheduler executions. */
+  scheduledExecutionLogs: "wa:schedule:execution_logs",
   /** Distributed lock while generating a keep-alive ping */
   keepAliveLock: (botId: string, peerId: string) =>
     `wa:keepalive:lock:${botId}:${peerId}`,

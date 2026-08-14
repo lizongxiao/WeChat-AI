@@ -8,7 +8,7 @@ import {
   listUserSubscriptions,
   markPeerKeepAlive,
   releaseKeepAliveLock,
-  saveScheduledOutbox,
+  saveScheduledExecutionLog,
   tryAcquireKeepAliveLock,
   tryAcquireScheduledExecutionLock,
   updateScheduledTask,
@@ -294,7 +294,11 @@ export class ScheduledScheduler {
     let sent=0, skipped=0; const details:Array<{peerId:string;reason:string}>=[]; const now=new Date();
     for(const sub of subs){
       onProgress?.({level:"info",stage:"subscriber",message:"开始处理订阅用户",peerId:sub.peer_id});
-      if(!(await isServiceOpenToPersona(this.opts.db,serviceId,sub.persona_id))){skipped++;details.push({peerId:sub.peer_id,reason:"persona_not_open"});onProgress?.({level:"warn",stage:"subscriber",message:"Persona 未开放此服务，已跳过",peerId:sub.peer_id});continue;}
+      if(!(await isServiceOpenToPersona(this.opts.db,serviceId,sub.persona_id))){
+        skipped++;details.push({peerId:sub.peer_id,reason:"persona_not_open"});onProgress?.({level:"warn",stage:"subscriber",message:"Persona 未开放此服务，已跳过",peerId:sub.peer_id});
+        await this.recordExecution("test","subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,"skipped","persona_not_open");
+        continue;
+      }
       // Probe the session before spending an LLM generation: a stale token
       // fails at delivery anyway, so fail fast with an actionable message.
       if(this.opts.probeSession){
@@ -313,6 +317,7 @@ export class ScheduledScheduler {
             message:`发送前会话探测失败${idle}：${detail}。请让该用户先给机器人发一条消息，再重新测试。`,
             peerId:sub.peer_id,
           });
+          await this.recordExecution("test","subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,"skipped",reason);
           continue;
         }
       }
@@ -337,7 +342,7 @@ export class ScheduledScheduler {
         message:`测试按当前时刻执行（${executionTime.toLocaleString("zh-CN",{timeZone:service.timezone,hour12:false})}，${service.timezone}），正式调度仍按 ${service.schedule}`,
         peerId:sub.peer_id,
       });
-      const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,scheduledTestLockSource("subscription",runId),executionTime,service.timezone,event=>onProgress?.({...event,peerId:sub.peer_id}),locationHintFromParams(resolved.params));
+      const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,scheduledTestLockSource("subscription",runId),executionTime,service.timezone,event=>onProgress?.({...event,peerId:sub.peer_id}),locationHintFromParams(resolved.params),"test");
       if(result.sent){sent++;onProgress?.({level:"info",stage:"complete",message:"发送成功",peerId:sub.peer_id});}
       else if(result.reason?.startsWith("queued_until_inbound")){skipped++;details.push({peerId:sub.peer_id,reason:result.reason});const real=result.reason.slice("queued_until_inbound:".length)||"未知原因";onProgress?.({level:"warn",stage:"complete",message:`会话令牌可能失效（${real}），已排队等用户开口补发`,peerId:sub.peer_id});}
       else {skipped++;details.push({peerId:sub.peer_id,reason:result.reason||"unknown"});onProgress?.({level:"error",stage:"complete",message:`发送失败：${result.reason||"unknown"}`,peerId:sub.peer_id});}
@@ -372,6 +377,9 @@ export class ScheduledScheduler {
   }
   private peerKey(botId: string, peerId: string): string {
     return `${botId}\0${peerId}`;
+  }
+  private async recordExecution(trigger:"natural"|"test",source:"task"|"subscription",id:string,botId:string,peerId:string,personaId:string,status:"sent"|"skipped"|"failed",reason?:string):Promise<void>{
+    await saveScheduledExecutionLog(this.opts.db,{trigger,source,target_id:id,bot_id:botId,peer_id:peerId,persona_id:personaId,status,reason:reason||null}).catch(()=>undefined);
   }
   private arm(ms:number){if(this.stopped)return;this.timer=setTimeout(()=>void this.tick().catch(e=>this.opts.log?.(`[schedule] tick error ${e instanceof Error?e.message:String(e)}`)).finally(()=>this.armAligned()),ms);}
   /**
@@ -513,12 +521,16 @@ export class ScheduledScheduler {
     const workers=Math.min(Math.max(1,concurrency),groups.length);
     await Promise.all(Array.from({length:workers},worker));
   }
-  private async run(source:"task"|"subscription",id:string,botId:string,peerId:string,personaId:string,prompt:string,web:boolean,now:Date,lockSource:string=source,executionTime:Date=now,timeZone="Asia/Shanghai",onProgress?:ScheduledTestProgressHandler,locationHint?:string):Promise<{sent:true}|{sent:false;reason:string}>{
+  private async run(source:"task"|"subscription",id:string,botId:string,peerId:string,personaId:string,prompt:string,web:boolean,now:Date,lockSource:string=source,executionTime:Date=now,timeZone="Asia/Shanghai",onProgress?:ScheduledTestProgressHandler,locationHint?:string,trigger:"natural"|"test"="natural"):Promise<{sent:true}|{sent:false;reason:string}>{
+    const finish=async(result:{sent:true}|{sent:false;reason:string})=>{
+      await this.recordExecution(trigger,source,id,botId,peerId,personaId,result.sent?"sent":result.reason.startsWith("duplicate_")||result.reason.startsWith("session_probe_failed")?"skipped":"failed",result.sent?undefined:result.reason.slice(0,500));
+      return result;
+    };
     const key=minuteKey(now);
     onProgress?.({level:"info",stage:"lock",message:"正在获取执行锁"});
     if(!(await tryAcquireScheduledExecutionLock(this.opts.db,lockSource,id,key,this.opts.lockTtlSec))){
       onProgress?.({level:"warn",stage:"lock",message:"本分钟已有相同执行，去重锁拒绝"});
-      return {sent:false,reason:"duplicate_execution_lock"};
+      return finish({sent:false,reason:"duplicate_execution_lock"});
     }
     let generated:InboundChatResult|null=null;
     try{
@@ -549,24 +561,21 @@ export class ScheduledScheduler {
       if(askKeepAliveReply){
         await markPeerKeepAlive(this.opts.db,botId,peerId,{sent:true}).catch(()=>undefined);
       }
-      return {sent:true};
+      return finish({sent:true});
     }catch(e){
       const reason=e instanceof Error?e.message:String(e);
       if(generated?.bubbles?.length && isStaleKeepAliveError(reason)){
-        await saveScheduledOutbox(this.opts.db,{
-          botId,peerId,source,id,texts:generated.bubbles,
-        }).catch(()=>undefined);
-        onProgress?.({level:"warn",stage:"error",message:`会话令牌可能失效（${reason.slice(0,160)}），已排队等用户开口补发`});
-        const patch={last_run_at:now.toISOString(),last_status:"error",last_error:`queued_until_inbound: ${reason.slice(0,160)}`};
+        onProgress?.({level:"warn",stage:"error",message:`会话令牌可能失效（${reason.slice(0,160)}），本次任务已丢弃，不会在用户开口后补发`});
+        const patch={last_run_at:now.toISOString(),last_status:"error",last_error:`delivery_failed_discarded: ${reason.slice(0,160)}`};
         source==="task"?await updateScheduledTask(this.opts.db,id,patch).catch(()=>undefined):await updateUserSubscription(this.opts.db,id,patch).catch(()=>undefined);
-        this.opts.log?.(`[schedule] ${source}=${id} queued until inbound`,e);
-        return {sent:false,reason:`queued_until_inbound: ${reason.slice(0,160)}`};
+        this.opts.log?.(`[schedule] ${source}=${id} delivery discarded`,e);
+        return finish({sent:false,reason:`delivery_failed_discarded: ${reason.slice(0,160)}`});
       }
       onProgress?.({level:"error",stage:"error",message:reason});
       const patch={last_run_at:now.toISOString(),last_status:"error",last_error:reason};
       source==="task"?await updateScheduledTask(this.opts.db,id,patch).catch(()=>undefined):await updateUserSubscription(this.opts.db,id,patch).catch(()=>undefined);
       this.opts.log?.(`[schedule] ${source}=${id} failed`,e);
-      return {sent:false,reason};
+      return finish({sent:false,reason});
     }
   }
   private soonerIso(a?: string | null, b?: string | null): string | null {

@@ -246,11 +246,12 @@ export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:s
         const service=await getSystemSubscriptionService(db,String(pending.payload.service_id));
         const params=(pending.payload.params as Record<string,unknown>)||{};
         if(!service?.enabled||!(await isServiceOpenToPersona(db,service.id,pending.persona_id))||validateSubscriptionParams(service.params_schema,params).length)return "该订阅计划已失效，请重新发起订阅。";
-        const existing=(await listPeerSubscriptions(db,input.botId,input.peerId)).find(x=>x.persona_id===pending.persona_id&&x.service_id===service.id);
-        if(existing){await clearPendingScheduledPlan(db,input.botId,input.peerId);return `你已经订阅了「${service.name}」。`;}
+        const existing=(await listPeerSubscriptions(db,input.botId,input.peerId)).find(x=>x.service_id===service.id);
         await createUserSubscription(db,{user_id:pending.user_id,bot_id:pending.bot_id,peer_id:pending.peer_id,persona_id:pending.persona_id,service_id:service.id,params,enabled:1});
         await clearPendingScheduledPlan(db,input.botId,input.peerId);
-        return `已订阅「${service.name}」，之后会按计划推送。`;
+        return existing
+          ? `已更新「${service.name}」的订阅人设和参数，之后会按计划推送。`
+          : `已订阅「${service.name}」，之后会按计划推送。`;
       }
       return confirm_scheduled_task(db,input);
     }

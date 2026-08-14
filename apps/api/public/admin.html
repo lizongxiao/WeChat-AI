@@ -4421,6 +4421,7 @@
         </div>
         <div class="panel schedule-list-panel"><div class="panel-head"><div><h3>系统订阅服务</h3><p class="muted">由管理员配置并按 Persona 开放</p></div></div><div class="table-wrap"><table class="data-table schedule-services-table"><thead><tr><th>服务名称</th><th>开放 Persona</th><th>订阅人数</th><th>执行计划</th><th>状态</th><th class="col-actions">管理</th></tr></thead><tbody id="ssServices"></tbody></table></div></div>
         <div class="panel schedule-list-panel" style="margin-top:18px"><div class="panel-head"><div><h3>用户自建任务</h3><p class="muted">用户通过对话创建并确认的个性化任务</p></div></div><div class="table-wrap"><table class="data-table schedule-tasks-table"><thead><tr><th>用户 / Peer</th><th>Bot</th><th>Persona</th><th>任务</th><th>执行计划</th><th>下次执行</th><th>状态</th><th>来源</th><th class="col-actions">管理</th></tr></thead><tbody id="ssTasks"></tbody></table></div></div>
+        <div class="panel schedule-list-panel" style="margin-top:18px"><div class="panel-head"><div><h3>执行日志</h3><p class="muted">保留最近 500 条已完成执行；失败的定时消息不会在用户下次开口时补发。</p></div><div class="row-actions"><select id="ssLogTrigger" aria-label="触发方式"><option value="">全部触发</option><option value="natural">自然触发</option><option value="test">测试触发</option></select><select id="ssLogStatus" aria-label="执行状态"><option value="">全部状态</option><option value="sent">发送成功</option><option value="skipped">跳过</option><option value="failed">失败</option></select><button class="btn btn-secondary btn-sm" id="ssLogRefresh" type="button"><i class="bi bi-arrow-clockwise"></i>刷新日志</button></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>时间</th><th>触发</th><th>类型</th><th>Peer</th><th>状态</th><th>原因</th></tr></thead><tbody id="ssExecutionLogs"></tbody></table></div></div>
       </section>
 
       <section id="skills">
@@ -8602,13 +8603,18 @@
     }
 
     async function loadSchedules(_force) {
-      const [servicesData, tasksData, personasData] = await Promise.all([
+      const logQuery = new URLSearchParams();
+      if ($("ssLogTrigger")?.value) logQuery.set("trigger", $("ssLogTrigger").value);
+      if ($("ssLogStatus")?.value) logQuery.set("status", $("ssLogStatus").value);
+      const [servicesData, tasksData, personasData, executionLogsData] = await Promise.all([
         api("/api/v1/admin/scheduled-services"),
         api("/api/v1/admin/scheduled-tasks"),
         api("/api/v1/admin/personas?includeDisabled=1"),
+        api("/api/v1/admin/scheduled-execution-logs?" + logQuery.toString()),
       ]);
       const services = servicesData.services || [];
       const tasks = tasksData.tasks || [];
+      const executionLogs = executionLogsData.logs || [];
       const personas = personasData.personas || []; const personaName = (id) => personas.find((p) => p.id === id)?.displayName || id;
       const parseCron = (cron) => { const f=String(cron||"").split(/\s+/); return { time: f.length===5 ? `${String(f[1]).padStart(2,"0")}:${String(f[0]).padStart(2,"0")}` : "08:00", frequency: f[4] === "*" ? "daily" : "weekly", weekday: f[4] || "1" }; };
       const cronFromForm = () => { const [h,m]=$("ssTime").value.split(":").map(Number); return `${m} ${h} * * ${$("ssFrequency").value === "weekly" ? $("ssWeekday").value : "*"}`; };
@@ -8623,6 +8629,7 @@
         if (raw.startsWith("web_search_failed:")) return `联网查询失败（${raw.slice(18)}）`;
         if (raw.startsWith("session_probe_failed:")) return `发送前会话探测失败（${raw.slice(20)}）。请让该用户先给机器人发一条消息，再重新测试。`;
         if (raw.startsWith("queued_until_inbound")) return `会话令牌可能失效（${raw.slice("queued_until_inbound:".length) || "未知原因"}），已排队等用户开口补发。请让该用户再发一条新消息。`;
+        if (raw.startsWith("delivery_failed_discarded:")) return `会话令牌可能失效（${raw.slice("delivery_failed_discarded:".length)}）；本次任务已丢弃，不会补发。`;
         if (raw.startsWith("ilink_error")) {
           if (/ret=-2|prepare failed|errcode=-14|ret=-14/.test(raw)) {
             return `会话令牌可能失效（${raw.replace(/^ilink_error:?\s*/, "")}），已排队等用户开口补发。请让该用户再发一条新消息。`;
@@ -8642,6 +8649,8 @@
           send_failed: "微信发送失败",
         }[raw] || raw;
       };
+      const logStatus = (status) => ({sent:'<span class="badge ok">发送成功</span>', skipped:'<span class="badge warn">跳过</span>', failed:'<span class="badge bad">失败</span>'}[status] || esc(status || "—"));
+      $("ssExecutionLogs").innerHTML = executionLogs.length ? executionLogs.map((entry) => `<tr><td>${esc(new Date(entry.created_at).toLocaleString())}</td><td><span class="badge">${entry.trigger === "test" ? "测试触发" : "自然触发"}</span></td><td>${entry.source === "subscription" ? "系统订阅" : "自建任务"}</td><td><code>${esc(entry.peer_id)}</code></td><td>${logStatus(entry.status)}</td><td>${esc(skipReasonText(entry.reason || ""))}</td></tr>`).join("") : '<tr><td colspan="6" class="empty">暂无符合筛选条件的执行日志</td></tr>';
       const scheduledRunText = (run) => {
         const status = run.status === "running" ? "运行中" : run.status === "completed" ? "已完成" : "失败";
         const lines = [`状态：${status}`, `开始：${new Date(run.startedAt).toLocaleString()}`, ""];
@@ -8722,6 +8731,9 @@
       document.querySelectorAll("[data-st-delete]").forEach((b) => b.onclick = async () => { if (!await confirmDialog("删除任务", "确认删除此用户任务？")) return; await api("/api/v1/admin/scheduled-tasks/" + encodeURIComponent(b.dataset.stDelete) + "/manage", {method:"POST", body:{delete:true}}); await loadSchedules(true); });
       document.querySelectorAll("[data-st-edit]").forEach((b)=>b.onclick=async()=>{const d=await api("/api/v1/admin/scheduled-tasks/"+encodeURIComponent(b.dataset.stEdit));const t=d.task;const name=prompt("任务名称",t.name);if(name===null)return;const taskPrompt=prompt("任务 Prompt",t.prompt);if(taskPrompt===null)return;const time=prompt("执行时间（HH:MM）",parseCron(t.schedule).time);if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time||"")){toast("时间格式应为 HH:MM",true);return;}const [h,m]=time.split(":").map(Number);await api("/api/v1/admin/scheduled-tasks/"+encodeURIComponent(t.id),{method:"PUT",body:{name,prompt:taskPrompt,schedule:`${m} ${h} * * *`,timezone:t.timezone,webSearchEnabled:Boolean(t.web_search_enabled)}});toast("任务已更新");await loadSchedules(true);});
       $("ssRefresh").onclick = () => loadSchedules(true).catch((e) => toast(e.message, true));
+      $("ssLogRefresh").onclick = () => loadSchedules(true).catch((e) => toast(e.message, true));
+      $("ssLogTrigger").onchange = () => loadSchedules(true).catch((e) => toast(e.message, true));
+      $("ssLogStatus").onchange = () => loadSchedules(true).catch((e) => toast(e.message, true));
       const syncServiceFrequencyFields = () => {
         const weekly = $("ssFrequency").value === "weekly";
         $("ssWeekdayWrap").hidden = !weekly;

@@ -152,6 +152,18 @@ type LocalInboundJob = InboundJob & {
   mediaRefs?: InboundMediaRef[];
 };
 
+/**
+ * Timestamp used to order persisted iLink context tokens. The server may
+ * redeliver the same message with a newer token, so equal values must still
+ * be allowed to replace the stored token (enforced by upsertContextToken).
+ */
+export function inboundContextTokenAt(msg: WeixinMessage): string {
+  const createdAtMs = Number(msg.create_time_ms);
+  return Number.isFinite(createdAtMs) && createdAtMs > 0
+    ? new Date(createdAtMs).toISOString()
+    : new Date().toISOString();
+}
+
 export interface WorkerOptions {
   db: Db;
   chat: ChatService;
@@ -2264,7 +2276,13 @@ export class BotWorkerManager {
     // content with a new context_token; keeping the old one makes the next
     // scheduled / proactive send fail with prepare failed ret=-2.
     try {
-      await upsertContextToken(this.opts.db, botId, peerId, contextToken);
+      await upsertContextToken(
+        this.opts.db,
+        botId,
+        peerId,
+        contextToken,
+        inboundContextTokenAt(msg),
+      );
     } catch {
       /* non-fatal */
     }
@@ -2447,17 +2465,10 @@ export class BotWorkerManager {
       return;
     }
 
-    // Always refresh context_token so later P2P / proactive push can reach this peer
-    try {
-      await upsertContextToken(
-        this.opts.db,
-        job.botId,
-        job.peerId,
-        job.contextToken,
-      );
-    } catch {
-      /* non-fatal */
-    }
+    // enqueueFromMessage persists the inbound token before dedup or queueing.
+    // Do not write job.contextToken here: this job may be older than a later
+    // inbound already observed by the poller, and scheduled sends must retain
+    // that newer token in Redis.
 
     const rateKey = `${job.botId}:${job.peerId}`;
     if (!this.peerLimiter.tryTake(rateKey)) {

@@ -2507,12 +2507,29 @@ export async function upsertContextToken(
   botAccountId: string,
   peerId: string,
   contextToken: string,
+  inboundAt = nowIso(),
 ): Promise<void> {
-  await db.redis
-    .multi()
-    .set(K.contextToken(botAccountId, peerId), contextToken)
-    .set(K.contextTokenAt(botAccountId, peerId), nowIso())
-    .exec();
+  // A reply job can finish after a newer getupdates delivery was already
+  // persisted. Never let that delayed job move Redis back to an older iLink
+  // context_token: ordinary replies use their job token directly, but scheduled
+  // sends read this key later and would otherwise pick the stale value.
+  //
+  // Equal timestamps deliberately replace the token. iLink can redeliver the
+  // same inbound content with a fresh token, and that fresh delivery wins.
+  await db.redis.eval(
+    `local current = redis.call('GET', KEYS[2])
+     if not current or ARGV[2] >= current then
+       redis.call('SET', KEYS[1], ARGV[1])
+       redis.call('SET', KEYS[2], ARGV[2])
+       return 1
+     end
+     return 0`,
+    2,
+    K.contextToken(botAccountId, peerId),
+    K.contextTokenAt(botAccountId, peerId),
+    contextToken,
+    inboundAt,
+  );
 }
 
 export async function listMemories(

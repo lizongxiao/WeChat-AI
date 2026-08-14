@@ -31,6 +31,17 @@ export function resolveVisionMode(raw: string | undefined): VisionMode {
   return v === "direct" ? "direct" : "caption";
 }
 
+/** Mask the password inside a Redis URL so logs never leak credentials. */
+export function redactRedisUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = "***";
+    return u.toString();
+  } catch {
+    return url.replace(/:\/\/([^:@/]+):([^@/]+)@/, "://$1:***@");
+  }
+}
+
 export function resolveLogLevel(raw: string | undefined): LogLevel {
   const v = (raw ?? "").trim().toLowerCase();
   return (LOG_LEVELS as readonly string[]).includes(v)
@@ -38,8 +49,7 @@ export function resolveLogLevel(raw: string | undefined): LogLevel {
     : "info";
 }
 
-export function resolveRepoRoot(start = process.cwd()): string {
-  let dir = path.resolve(start);
+export function resolveRepoRoot(start = process.cwd()): string {  let dir = path.resolve(start);
   for (let i = 0; i < 10; i++) {
     if (fs.existsSync(path.join(dir, "pnpm-workspace.yaml"))) return dir;
     const parent = path.dirname(dir);

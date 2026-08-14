@@ -28,6 +28,10 @@ tokens/
 .vscode/
 *.swp
 
+# Reasonix agent workspace state (local tool artifacts)
+.reasonix/
+reasonix.toml
+
 # Python (huggingface/wechat-ai-tools)
 __pycache__/
 *.pyc

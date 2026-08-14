@@ -20,6 +20,7 @@ import {
 } from "@wechat-ai/db";
 import {
   DEFAULT_KEEP_ALIVE_POLICY,
+  hoursSince,
   isKeepAliveEligible,
   isStaleKeepAliveError,
   shouldPiggybackKeepAlive,
@@ -55,6 +56,12 @@ export interface ScheduledSchedulerOptions {
     peerId: string,
     text: string,
   ) => Promise<ScheduledSendResult>;
+  /** Probe the peer's session token (getconfig round-trip) before a manual
+   * test spends an LLM generation on an unreachable session. */
+  probeSession?: (
+    botId: string,
+    peerId: string,
+  ) => Promise<{ ok: boolean; detail?: string }>;
   keepAlive?: KeepAliveSchedulerConfig;
   /** Catch-up window after a scheduled instant (ms). Default 10 minutes. */
   missedGraceMs?: number;
@@ -278,6 +285,27 @@ export class ScheduledScheduler {
     for(const sub of subs){
       onProgress?.({level:"info",stage:"subscriber",message:"开始处理订阅用户",peerId:sub.peer_id});
       if(!(await isServiceOpenToPersona(this.opts.db,serviceId,sub.persona_id))){skipped++;details.push({peerId:sub.peer_id,reason:"persona_not_open"});onProgress?.({level:"warn",stage:"subscriber",message:"Persona 未开放此服务，已跳过",peerId:sub.peer_id});continue;}
+      // Probe the session before spending an LLM generation: a stale token
+      // fails at delivery anyway, so fail fast with an actionable message.
+      if(this.opts.probeSession){
+        const tokenInfo=await getContextTokenInfo(this.opts.db,sub.bot_id,sub.peer_id);
+        const inboundHours=hoursSince(tokenInfo?.inboundAt ?? null, now);
+        const probe=await this.opts.probeSession(sub.bot_id,sub.peer_id);
+        if(!probe.ok){
+          skipped++;
+          const detail=probe.detail||"session_expired";
+          const reason=detail==="no_context_token"?"no_context_token":`session_probe_failed:${detail}`;
+          details.push({peerId:sub.peer_id,reason});
+          const idle=inboundHours!=null?`（最后入站约 ${Math.round(inboundHours*10)/10} 小时前）`:"（无入站记录）";
+          onProgress?.({
+            level:"warn",
+            stage:"subscriber",
+            message:`发送前会话探测失败${idle}：${detail}。请让该用户先给机器人发一条消息，再重新测试。`,
+            peerId:sub.peer_id,
+          });
+          continue;
+        }
+      }
       const resolved=resolveScheduledParams(sub.params,service.params_schema);
       if(resolved.defaultsApplied.length){
         onProgress?.({
@@ -301,7 +329,7 @@ export class ScheduledScheduler {
       });
       const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,scheduledTestLockSource("subscription",runId),executionTime,service.timezone,event=>onProgress?.({...event,peerId:sub.peer_id}),locationHintFromParams(resolved.params));
       if(result.sent){sent++;onProgress?.({level:"info",stage:"complete",message:"发送成功",peerId:sub.peer_id});}
-      else if(result.reason==="queued_until_inbound"){skipped++;details.push({peerId:sub.peer_id,reason:result.reason});onProgress?.({level:"warn",stage:"complete",message:"会话令牌可能失效，已排队等用户开口补发",peerId:sub.peer_id});}
+      else if(result.reason?.startsWith("queued_until_inbound")){skipped++;details.push({peerId:sub.peer_id,reason:result.reason});const real=result.reason.slice("queued_until_inbound:".length)||"未知原因";onProgress?.({level:"warn",stage:"complete",message:`会话令牌可能失效（${real}），已排队等用户开口补发`,peerId:sub.peer_id});}
       else {skipped++;details.push({peerId:sub.peer_id,reason:result.reason||"unknown"});onProgress?.({level:"error",stage:"complete",message:`发送失败：${result.reason||"unknown"}`,peerId:sub.peer_id});}
     }
     onProgress?.({level:skipped?"warn":"info",stage:"summary",message:`测试结束：发送 ${sent}，跳过 ${skipped}`});
@@ -516,11 +544,11 @@ export class ScheduledScheduler {
         await saveScheduledOutbox(this.opts.db,{
           botId,peerId,source,id,texts:generated.bubbles,
         }).catch(()=>undefined);
-        onProgress?.({level:"warn",stage:"error",message:"会话令牌可能失效，已排队等用户开口补发"});
-        const patch={last_run_at:now.toISOString(),last_status:"error",last_error:"queued_until_inbound"};
+        onProgress?.({level:"warn",stage:"error",message:`会话令牌可能失效（${reason.slice(0,160)}），已排队等用户开口补发`});
+        const patch={last_run_at:now.toISOString(),last_status:"error",last_error:`queued_until_inbound: ${reason.slice(0,160)}`};
         source==="task"?await updateScheduledTask(this.opts.db,id,patch).catch(()=>undefined):await updateUserSubscription(this.opts.db,id,patch).catch(()=>undefined);
         this.opts.log?.(`[schedule] ${source}=${id} queued until inbound`,e);
-        return {sent:false,reason:"queued_until_inbound"};
+        return {sent:false,reason:`queued_until_inbound: ${reason.slice(0,160)}`};
       }
       onProgress?.({level:"error",stage:"error",message:reason});
       const patch={last_run_at:now.toISOString(),last_status:"error",last_error:reason};

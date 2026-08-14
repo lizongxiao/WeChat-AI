@@ -987,9 +987,37 @@ export class BotWorkerManager {
       log: this.opts.log,
       sendReply: (botId, peerId, reply) => this.sendScheduledReply(botId, peerId, reply),
       sendKeepAlive: (botId, peerId, text) => this.adminSendText(botId, peerId, text),
+      probeSession: (botId, peerId) => this.probeSession(botId, peerId),
       keepAlive: this.opts.keepAlive,
     });
     this.scheduled.start();
+  }
+
+  /**
+   * Probe a peer's session token with a getconfig round-trip before a manual
+   * service test spends an LLM generation on an unreachable session.
+   */
+  private async probeSession(
+    botId: string,
+    peerId: string,
+  ): Promise<{ ok: boolean; detail?: string }> {
+    const token = await getContextToken(this.opts.db, botId, peerId);
+    if (!token) return { ok: false, detail: "no_context_token" };
+    let client = this.clients.get(botId);
+    if (!client) {
+      const creds = await getBotCredentials(this.opts.db, botId);
+      if (!creds?.botToken) return { ok: false, detail: "bot_offline" };
+      client = new ILinkClient({
+        botToken: creds.botToken,
+        baseUrl: creds.baseUrl ?? undefined,
+      });
+    }
+    try {
+      await client.getConfig({ toUserId: peerId, contextToken: token });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, detail: formatScheduledSendError(err) };
+    }
   }
 
   /** Admin-only route uses this to smoke-test a service against real, opted-in

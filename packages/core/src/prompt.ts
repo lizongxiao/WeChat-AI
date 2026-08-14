@@ -433,6 +433,27 @@ function formatScheduledDateLabel(iso: string, timeZone: string): string {
   return c.weekdayShort ? `${date} ${c.weekdayShort}` : date;
 }
 
+/** The model remains free to choose a greeting, but may not contradict the
+ * execution clock in the opening sentence. */
+function scheduledGreetingPeriod(iso: string, timeZone: string): { label: string; forbidden: RegExp } {
+  const hour = Number(scheduledClock(iso, timeZone).hour);
+  if (hour >= 5 && hour < 11) return { label: "早晨", forbidden: /(?:中午|午后|下午|傍晚|晚上|夜里|晚安)/u };
+  if (hour >= 11 && hour < 14) return { label: "中午", forbidden: /(?:早[啊安上]|晨间|上午|午后|下午|傍晚|晚上|夜里|晚安)/u };
+  if (hour >= 14 && hour < 18) return { label: "下午", forbidden: /(?:早[啊安上]|晨间|上午|中午|晚上|夜里|晚安)/u };
+  if (hour >= 18 && hour < 23) return { label: "晚上", forbidden: /(?:早[啊安上]|晨间|上午|中午|午后|下午)/u };
+  return { label: "夜间", forbidden: /(?:早[啊安上]|晨间|上午|中午|午后|下午|傍晚)/u };
+}
+/** Returns a repairable issue only for a contradictory opening. It never
+ * requires a greeting or dictates a phrase, preserving Persona freedom. */
+export function scheduledGreetingIssue(text: string, iso: string, timeZone: string): string | null {
+  const opening = (text ?? "").trim().split(/\n/u, 1)[0]?.slice(0, 120) ?? "";
+  if (!opening) return null;
+  const period = scheduledGreetingPeriod(iso, timeZone);
+  return period.forbidden.test(opening)
+    ? `开场问候与业务执行时间不符：当前为${period.label}，请按当前时段自然改写开场；不必使用固定问候语`
+    : null;
+}
+
 /**
  * Models often copy last year's weekday (2025-08-13 was Wednesday) or a stale
  * search snippet. Rewrite 周X / 星期X only when it sits next to today's date.
@@ -502,7 +523,7 @@ export function buildScheduledMessages(params: {
     "## 定时任务执行规则",
     `本次任务的业务执行时间是 ${executionTime}（${params.timeZone}）。所有“今天、早上、晚上、日期、星期”等相对时间，以及问候语，均以此时间为准。`,
     weekdayLine,
-    "若执行时间不在早晨，不要机械说“早上好”；按该时刻自然问候（例如晚上用晚上好/夜里好）。",
+    `当前属于${scheduledGreetingPeriod(params.executionTime, params.timeZone).label}。开场可自由发挥或不写问候，但不得使用与当前时段矛盾的问候语。`,
     "这是独立的定时推送，不是在续接最近一轮聊天。",
     "任务内容与格式要求优先于 Persona；Persona 只决定措辞、语气和称呼，不得删减任务要求的栏目。",
     "若任务要求保留换行或多栏目结构，输出中每个栏目（如 🌤️ / 🌡️ / 今日寄语）必须单独成行，禁止把整段挤成一行。",

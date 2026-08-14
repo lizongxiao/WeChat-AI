@@ -41,6 +41,7 @@ import {
   normalizeScheduledLayout,
   correctScheduledWeekday,
   scheduledOutputIssues,
+  scheduledGreetingIssue,
   buildScheduledRepairUserMessage,
   splitScheduledBulletin,
   type PromptAttachment,
@@ -1209,7 +1210,11 @@ export class ChatService {
         usage.finishReason ? `，finish_reason=${usage.finishReason}` : ""
       }）${usage.text ? `：${previewText(usage.text)}` : ""}`,
     });
-    let issues = scheduledOutputIssues(req.prompt, usage.text);
+    const outputIssues = (text: string) => [
+      ...scheduledOutputIssues(req.prompt, text),
+      ...[scheduledGreetingIssue(text, executionTime, timeZone)].filter((x): x is string => Boolean(x)),
+    ];
+    let issues = outputIssues(usage.text);
     if (issues.length) {
       req.onProgress?.({
         stage: "validation",
@@ -1235,7 +1240,7 @@ export class ChatService {
         completionTokens: usage.completionTokens + retry.completionTokens,
         totalTokens: usage.totalTokens + retry.totalTokens,
       };
-      issues = scheduledOutputIssues(req.prompt, usage.text);
+      issues = outputIssues(usage.text);
       req.onProgress?.({
         stage: "validation",
         message: issues.length

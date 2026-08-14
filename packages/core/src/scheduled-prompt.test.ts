@@ -7,6 +7,7 @@ import {
   extractScheduledOutputSkeleton,
   normalizeScheduledLayout,
   scheduledOutputIssues,
+  scheduledGreetingIssue,
   splitScheduledBulletin,
 } from "./prompt.js";
 import {
@@ -25,6 +26,12 @@ const taskPrompt = `这是每天早晨主动发送给用户的天气与晨间问
 整体控制在 150~300 字`;
 
 describe("scheduled prompt contract", () => {
+  it("rejects a contradictory opening greeting but leaves wording otherwise free", () => {
+    const at = "2026-08-14T06:35:00.000Z"; // 14:35 Shanghai
+    assert.match(scheduledGreetingIssue("早啊，忙完了吗？", at, "Asia/Shanghai") || "", /下午/);
+    assert.equal(scheduledGreetingIssue("忙完了吗？", at, "Asia/Shanghai"), null);
+    assert.equal(scheduledGreetingIssue("午后好呀，忙完了吗？", at, "Asia/Shanghai"), null);
+  });
   it("gives the scheduled instruction priority without replaying chat history", () => {
     const messages = buildScheduledMessages({
       systemPrompt: "你是一只喜欢短句闲聊的猫娘。",

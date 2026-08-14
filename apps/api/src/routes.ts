@@ -183,7 +183,6 @@ import {
   setServicePersonas,
   listServicePersonaIds,
   isServiceOpenToPersona,
-  isUserSubscriptionActiveForCurrentPersona,
   savePendingScheduledPlan,
   getPendingScheduledPlan,
   clearPendingScheduledPlan,
@@ -4499,7 +4498,7 @@ export async function registerRoutes(
     const admin = await requireSuperAdmin(req, reply, ctx); if (!admin) return;
     const services = await listSystemSubscriptionServices(ctx.db, true);
     const subscriptions = await listUserSubscriptions(ctx.db);
-    return { services: await Promise.all(services.map(async s => { const candidates=subscriptions.filter(x => x.service_id === s.id && x.enabled); const active=await Promise.all(candidates.map(x=>isUserSubscriptionActiveForCurrentPersona(ctx.db,x))); return { ...s, personaIds: await listServicePersonaIds(ctx.db, s.id), subscriberCount: active.filter(Boolean).length }; })) };
+    return { services: await Promise.all(services.map(async s => { const candidates=subscriptions.filter(x => x.service_id === s.id && x.enabled); const deliverable=await Promise.all(candidates.map(x=>isServiceOpenToPersona(ctx.db,s.id,x.persona_id))); return { ...s, personaIds: await listServicePersonaIds(ctx.db, s.id), subscriberCount: deliverable.filter(Boolean).length }; })) };
   });
   app.post<{ Body: { name:string; description?:string; promptTemplate:string; paramsSchema?:Record<string,unknown>; schedule:string; timezone?:string; webSearchEnabled?:boolean; enabled?:boolean; personaIds?:string[] } }>("/api/v1/admin/scheduled-services", async (req, reply) => {
     const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return; const b=req.body;

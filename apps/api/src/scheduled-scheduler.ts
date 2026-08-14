@@ -1,11 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
   ensurePeer,
-  getPersona,
   getContextTokenInfo,
   getSystemSubscriptionService,
   isServiceOpenToPersona,
-  isUserSubscriptionActiveForCurrentPersona,
   listScheduledTasks,
   listUserSubscriptions,
   markPeerKeepAlive,
@@ -15,7 +13,6 @@ import {
   tryAcquireScheduledExecutionLock,
   updateScheduledTask,
   updateUserSubscription,
-  resolvePersonaForPeer,
   type Db,
   type ScheduledTask,
   type UserSubscription,
@@ -288,22 +285,12 @@ export class ScheduledScheduler {
     if(!service?.enabled) throw new Error("service_unavailable");
     onProgress?.({level:"info",stage:"prepare",message:`已加载服务「${service.name}」，计划 ${service.schedule}（${service.timezone}）`});
     const candidates=(await listUserSubscriptions(this.opts.db)).filter(s=>s.enabled&&s.service_id===serviceId&&(!personaId||s.persona_id===personaId));
-    const subs=[] as typeof candidates;
-    for(const sub of candidates){
-      if(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub)){subs.push(sub);continue;}
-      // Surface the exact data decision in the smoke-test transcript. This is
-      // intentionally a skip: a subscription belongs to the Persona selected
-      // when it was created and must not leak into a later Persona switch.
-      const [subPersona,currentPersona]=await Promise.all([
-        getPersona(this.opts.db,sub.persona_id),
-        resolvePersonaForPeer(this.opts.db,sub.bot_id,sub.peer_id),
-      ]);
-      onProgress?.({
-        level:"warn",stage:"subscriber",peerId:sub.peer_id,
-        message:`订阅 Persona「${subPersona?.display_name??sub.persona_id}」与当前 Persona「${currentPersona?.display_name??currentPersona?.id??"未配置"}」不一致，未参与本次测试`,
-      });
-    }
-    onProgress?.({level:"info",stage:"prepare",message:`找到 ${candidates.length} 个启用订阅，其中 ${subs.length} 个当前 Persona 匹配`});
+    // A subscription is bound to the Persona selected at confirmation time.
+    // Switching the peer's current chat Persona must not silently cancel it:
+    // run() passes sub.persona_id to the scheduled chat call below.
+    const subs=candidates;
+    const matchedPeers=new Set(subs.map(sub=>this.peerKey(sub.bot_id,sub.peer_id))).size;
+    onProgress?.({level:"info",stage:"prepare",message:`找到 ${subs.length} 个启用订阅，涉及 ${matchedPeers} 位用户；将按各自订阅时的人设发送`});
     let sent=0, skipped=0; const details:Array<{peerId:string;reason:string}>=[]; const now=new Date();
     for(const sub of subs){
       onProgress?.({level:"info",stage:"subscriber",message:"开始处理订阅用户",peerId:sub.peer_id});
@@ -356,7 +343,7 @@ export class ScheduledScheduler {
       else {skipped++;details.push({peerId:sub.peer_id,reason:result.reason||"unknown"});onProgress?.({level:"error",stage:"complete",message:`发送失败：${result.reason||"unknown"}`,peerId:sub.peer_id});}
     }
     onProgress?.({level:skipped?"warn":"info",stage:"summary",message:`测试结束：发送 ${sent}，跳过 ${skipped}`});
-    return {sent,skipped,matched:subs.length,details};
+    return {sent,skipped,matched:matchedPeers,details};
   }
   applyRuntimeOptions(patch: Partial<Pick<ScheduledSchedulerOptions, "keepAlive">>): void {
     if (patch.keepAlive) {
@@ -454,7 +441,6 @@ export class ScheduledScheduler {
         });
       }
       for(const sub of subs){
-        if(!(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub)))continue;
         const service=await getSystemSubscriptionService(this.opts.db,sub.service_id);
         if(!service?.enabled||!(await isServiceOpenToPersona(this.opts.db,service.id,sub.persona_id)))continue;
         const decision=decideScheduledDue({
@@ -620,7 +606,6 @@ export class ScheduledScheduler {
       bump(task.bot_id, task.peer_id, next);
     }
     for (const sub of subs) {
-      if (!(await isUserSubscriptionActiveForCurrentPersona(this.opts.db, sub))) continue;
       const service = await getSystemSubscriptionService(this.opts.db, sub.service_id);
       if (!service?.enabled || !(await isServiceOpenToPersona(this.opts.db, service.id, sub.persona_id))) continue;
       const next = sub.next_run_at || nextCronRun(service.schedule, service.timezone, now);

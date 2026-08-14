@@ -1,7 +1,6 @@
 import type { RedisStore } from "./client.js";
 import { newId, nowIso } from "./client.js";
 import { K } from "./keys.js";
-import { resolvePersonaForPeer } from "./repos.js";
 
 export interface SystemSubscriptionService {
   id: string; name: string; description: string; prompt_template: string;
@@ -13,16 +12,6 @@ export interface UserSubscription {
   service_id: string; params: Record<string, unknown>; enabled: number;
   created_at: string; updated_at: string; last_run_at?: string | null; next_run_at?: string | null;
   last_status?: string | null; last_error?: string | null;
-}
-/** A subscription is active only while the peer is still using the Persona it
- * was created under.  Service membership alone is not enough after a switch. */
-export function subscriptionMatchesCurrentPersona(subscription: UserSubscription, currentPersonaId?: string | null) {
-  return Boolean(subscription.enabled && currentPersonaId && subscription.persona_id === currentPersonaId);
-}
-export async function isUserSubscriptionActiveForCurrentPersona(db: RedisStore, subscription: UserSubscription) {
-  if (!subscription.enabled) return false;
-  const persona = await resolvePersonaForPeer(db, subscription.bot_id, subscription.peer_id);
-  return subscriptionMatchesCurrentPersona(subscription, persona?.id);
 }
 export interface ScheduledTask {
   id: string; user_id: string; bot_id: string; peer_id: string; persona_id: string;

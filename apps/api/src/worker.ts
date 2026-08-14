@@ -164,6 +164,11 @@ export function inboundContextTokenAt(msg: WeixinMessage): string {
     : new Date().toISOString();
 }
 
+/** Stable, non-secret correlation id for following a token through logs. */
+export function contextTokenFingerprint(contextToken: string): string {
+  return createHash("sha256").update(contextToken).digest("hex").slice(0, 12);
+}
+
 export interface WorkerOptions {
   db: Db;
   chat: ChatService;
@@ -998,6 +1003,8 @@ export class BotWorkerManager {
       lockTtlSec: 120,
       log: this.opts.log,
       sendReply: (botId, peerId, reply) => this.sendScheduledReply(botId, peerId, reply),
+      runDeliveryOnPeerChain: (botId, peerId, fn) =>
+        this.enqueuePeerChain(botId, peerId, fn),
       sendKeepAlive: (botId, peerId, text) => this.adminSendText(botId, peerId, text),
       probeSession: (botId, peerId) => this.probeSession(botId, peerId),
       keepAlive: this.opts.keepAlive,
@@ -1026,6 +1033,9 @@ export class BotWorkerManager {
     }
     try {
       await client.getConfig({ toUserId: peerId, contextToken: token });
+      this.opts.log?.(
+        `[worker] session probe getconfig ok bot=${botId} peer=${peerId} ctx=${contextTokenFingerprint(token)}`,
+      );
       return { ok: true };
     } catch (err) {
       return { ok: false, detail: formatScheduledSendError(err) };
@@ -1207,6 +1217,9 @@ export class BotWorkerManager {
         if (i > 0) await sleep(rand(480, 900));
         const latest =
           (await getContextToken(this.opts.db, botId, peerId)) || contextToken;
+        this.opts.log?.(
+          `[worker] scheduled send attempt bot=${botId} peer=${peerId} part=${i + 1}/${parts.length} ctx=${contextTokenFingerprint(latest)}`,
+        );
         try {
           await this.sendReplyPart(client, peerId, latest, parts[i]!, ownerUserId);
         } catch (err) {
@@ -1277,25 +1290,31 @@ export class BotWorkerManager {
   }
 
   /** Serialize work per bot:peer (inbound replies + proactive sends). */
-  private enqueuePeerChain(
+  private enqueuePeerChain<T>(
     botId: string,
     peerId: string,
-    fn: () => Promise<void>,
-  ): Promise<void> {
+    fn: () => Promise<T>,
+  ): Promise<T> {
     const key = `${botId}:${peerId}`;
     const prev = this.peerChains.get(key) ?? Promise.resolve();
-    const next = prev.then(fn).catch((err) => {
-      this.opts.log?.(
-        `[worker] peer chain error: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    });
+    const result: Promise<T> = prev.then(() => fn());
+    // The tail must settle even when this operation fails, otherwise a failed
+    // delivery would poison every later inbound / scheduled send for the peer.
+    const next: Promise<void> = result.then(
+      () => undefined,
+      (err) => {
+        this.opts.log?.(
+          `[worker] peer chain error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      },
+    );
     this.peerChains.set(key, next);
     void next.finally(() => {
       if (this.peerChains.get(key) === next) this.peerChains.delete(key);
     });
-    return next;
+    return result;
   }
 
   /**
@@ -2271,6 +2290,7 @@ export class BotWorkerManager {
     const peerId = msg.from_user_id;
     const contextToken = msg.context_token;
     if (!peerId || !contextToken) return;
+    const contextTokenAt = inboundContextTokenAt(msg);
 
     // Persist before dedup / inbox-full drops. iLink redelivers the same
     // content with a new context_token; keeping the old one makes the next
@@ -2281,7 +2301,10 @@ export class BotWorkerManager {
         botId,
         peerId,
         contextToken,
-        inboundContextTokenAt(msg),
+        contextTokenAt,
+      );
+      this.opts.log?.(
+        `[worker] inbound context_token refreshed bot=${botId} peer=${peerId} ctx=${contextTokenFingerprint(contextToken)} at=${contextTokenAt}`,
       );
     } catch {
       /* non-fatal */
@@ -2412,7 +2435,7 @@ export class BotWorkerManager {
       if (!job) continue;
       await this.enqueuePeerChain(job.botId, job.peerId, () =>
         this.handleJob(job),
-      );
+      ).catch(() => undefined);
     }
     void idx;
   }

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   ensurePeer,
+  getPersona,
   getContextTokenInfo,
   getSystemSubscriptionService,
   isServiceOpenToPersona,
@@ -14,6 +15,7 @@ import {
   tryAcquireScheduledExecutionLock,
   updateScheduledTask,
   updateUserSubscription,
+  resolvePersonaForPeer,
   type Db,
   type ScheduledTask,
   type UserSubscription,
@@ -51,6 +53,13 @@ export interface ScheduledSchedulerOptions {
     peerId: string,
     reply: InboundChatResult,
   ) => Promise<ScheduledSendResult>;
+  /** Serialize delivery with ordinary replies for this peer. Generation stays
+   * outside the chain so a slow LLM never delays processing a new inbound. */
+  runDeliveryOnPeerChain?: <T>(
+    botId: string,
+    peerId: string,
+    fn: () => Promise<T>,
+  ) => Promise<T>;
   sendKeepAlive?: (
     botId: string,
     peerId: string,
@@ -279,7 +288,21 @@ export class ScheduledScheduler {
     if(!service?.enabled) throw new Error("service_unavailable");
     onProgress?.({level:"info",stage:"prepare",message:`已加载服务「${service.name}」，计划 ${service.schedule}（${service.timezone}）`});
     const candidates=(await listUserSubscriptions(this.opts.db)).filter(s=>s.enabled&&s.service_id===serviceId&&(!personaId||s.persona_id===personaId));
-    const subs=[] as typeof candidates; for(const sub of candidates)if(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub))subs.push(sub);
+    const subs=[] as typeof candidates;
+    for(const sub of candidates){
+      if(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub)){subs.push(sub);continue;}
+      // Surface the exact data decision in the smoke-test transcript. This is
+      // intentionally a skip: a subscription belongs to the Persona selected
+      // when it was created and must not leak into a later Persona switch.
+      const [subPersona,currentPersona]=await Promise.all([
+        getPersona(this.opts.db,sub.persona_id),
+        resolvePersonaForPeer(this.opts.db,sub.bot_id,sub.peer_id),
+      ]);
+      onProgress?.({
+        level:"warn",stage:"subscriber",peerId:sub.peer_id,
+        message:`订阅 Persona「${subPersona?.display_name??sub.persona_id}」与当前 Persona「${currentPersona?.display_name??currentPersona?.id??"未配置"}」不一致，未参与本次测试`,
+      });
+    }
     onProgress?.({level:"info",stage:"prepare",message:`找到 ${candidates.length} 个启用订阅，其中 ${subs.length} 个当前 Persona 匹配`});
     let sent=0, skipped=0; const details:Array<{peerId:string;reason:string}>=[]; const now=new Date();
     for(const sub of subs){
@@ -527,7 +550,10 @@ export class ScheduledScheduler {
       if(r.kind!=="reply"||!r.text)throw new Error(r.skipReason||r.kind);
       generated=r;
       onProgress?.({level:"info",stage:"delivery",message:"内容生成成功，正在发送到微信"});
-      const out=await this.opts.sendReply(botId,peerId,r);
+      const deliver=()=>this.opts.sendReply(botId,peerId,r);
+      const out=this.opts.runDeliveryOnPeerChain
+        ?await this.opts.runDeliveryOnPeerChain(botId,peerId,deliver)
+        :await deliver();
       if(!out.ok){
         const sendReason=out.error?`${out.reason}: ${out.error}`:(out.reason||"send_failed");
         throw new Error(sendReason);

@@ -190,6 +190,11 @@ import {
   validateSubscriptionParams,
   setPersonaServiceIds,
   listPersonaServiceIds,
+  getGlobalDisabledSkills,
+  getPersonaSkillOverrides,
+  setGlobalSkillEnabled,
+  setPersonaSkillOverride,
+  isSkillEnabled,
 } from "@wechat-ai/db";
 import {
   mergeBotProactiveConfig,
@@ -4505,7 +4510,15 @@ export async function registerRoutes(
   app.put<{ Params:{id:string}; Body: { name?:string; description?:string; promptTemplate?:string; paramsSchema?:Record<string,unknown>; schedule?:string; timezone?:string; webSearchEnabled?:boolean; enabled?:boolean; personaIds?:string[] } }>("/api/v1/admin/scheduled-services/:id", async (req,reply)=>{
     const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return; const old=await getSystemSubscriptionService(ctx.db,req.params.id);if(!old)return reply.code(404).send({error:"not found"});const b=req.body||{};
     const service=await saveSystemSubscriptionService(ctx.db,{...old,id:old.id,name:b.name?.trim()??old.name,description:b.description?.trim()??old.description,prompt_template:b.promptTemplate?.trim()??old.prompt_template,params_schema:b.paramsSchema??old.params_schema,schedule:b.schedule?.trim()??old.schedule,timezone:b.timezone??old.timezone,web_search_enabled:b.webSearchEnabled===undefined?old.web_search_enabled:(b.webSearchEnabled?1:0),enabled:b.enabled===undefined?old.enabled:(b.enabled?1:0)});
-    if(b.personaIds)await setServicePersonas(ctx.db,service.id,b.personaIds); await writeAudit(ctx.db,"scheduled_service_updated",admin.id,{serviceId:service.id});return {service};
+    if(b.personaIds)await setServicePersonas(ctx.db,service.id,b.personaIds);
+    if(b.schedule!==undefined&&b.schedule?.trim()!==old.schedule||b.timezone!==undefined&&b.timezone!==old.timezone){
+      // Schedule/timezone change: clear every subscriber's next_run_at so the
+      // expiry-driven scheduler re-initializes against the new plan instead of
+      // waiting for the stale next instant.
+      const affected=(await listUserSubscriptions(ctx.db)).filter(s=>s.service_id===service.id);
+      await Promise.all(affected.map(s=>updateUserSubscription(ctx.db,s.id,{next_run_at:null}).catch(()=>undefined)));
+    }
+    await writeAudit(ctx.db,"scheduled_service_updated",admin.id,{serviceId:service.id});return {service};
   });
   app.delete<{ Params:{id:string} }>("/api/v1/admin/scheduled-services/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;await deleteSystemSubscriptionService(ctx.db,req.params.id);await writeAudit(ctx.db,"scheduled_service_deleted",admin.id,{serviceId:req.params.id});return {ok:true};});
   app.post<{ Params:{id:string}; Body:{personaId?:string} }>("/api/v1/admin/scheduled-services/:id/test",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const service=await getSystemSubscriptionService(ctx.db,req.params.id);if(!service?.enabled)return reply.code(409).send({error:"service_unavailable"});const personaId=req.body?.personaId;if(personaId&&!(await isServiceOpenToPersona(ctx.db,service.id,personaId)))return reply.code(400).send({error:"persona_not_open_for_service"});try{const run=ctx.worker.startScheduledServiceTest(service.id,personaId);await writeAudit(ctx.db,"scheduled_service_test_started",admin.id,{serviceId:service.id,personaId:personaId||null,runId:run.id});return reply.code(202).send({ok:true,run});}catch(err){return reply.code(500).send({error:err instanceof Error?err.message:String(err)});}});
@@ -4514,6 +4527,40 @@ export async function registerRoutes(
   app.get<{ Params:{id:string} }>("/api/v1/admin/scheduled-tasks/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const task=await getScheduledTask(ctx.db,req.params.id);if(!task)return reply.code(404).send({error:"not found"});return {task};});
   app.put<{ Params:{id:string}; Body:{name?:string;prompt?:string;schedule?:string;timezone?:string;webSearchEnabled?:boolean;enabled?:boolean} }>("/api/v1/admin/scheduled-tasks/:id",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const old=await getScheduledTask(ctx.db,req.params.id);if(!old)return reply.code(404).send({error:"not found"});const b=req.body||{};const task=await updateScheduledTask(ctx.db,old.id,{name:b.name?.trim()||old.name,prompt:b.prompt?.trim()||old.prompt,schedule:b.schedule?.trim()||old.schedule,timezone:b.timezone?.trim()||old.timezone,web_search_enabled:b.webSearchEnabled===undefined?old.web_search_enabled:(b.webSearchEnabled?1:0),enabled:b.enabled===undefined?old.enabled:(b.enabled?1:0),next_run_at:null});await writeAudit(ctx.db,"scheduled_task_admin_updated",admin.id,{taskId:task.id});return {task};});
   app.post<{ Params:{id:string}; Body:{enabled?:boolean; delete?:boolean} }>("/api/v1/admin/scheduled-tasks/:id/manage",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const task=await getScheduledTask(ctx.db,req.params.id);if(!task)return reply.code(404).send({error:"not found"});if(req.body?.delete)await deleteScheduledTask(ctx.db,task.id);else await updateScheduledTask(ctx.db,task.id,{enabled:req.body?.enabled?1:0});await writeAudit(ctx.db,"scheduled_task_admin_manage",admin.id,{taskId:task.id});return {ok:true};});
+
+  // ── Skills (pluggable chat capabilities) ───────────────
+  app.get("/api/v1/admin/skills", async (req, reply) => {
+    const admin = await requireSuperAdmin(req, reply, ctx);
+    if (!admin) return;
+    const skills = ctx.worker.listSkills();
+    const globalDisabled = new Set(await getGlobalDisabledSkills(ctx.db));
+    const personas = await Promise.all(
+      (await listPersonas(ctx.db)).map(async (p) => {
+        const overrides = await getPersonaSkillOverrides(ctx.db, p.id);
+        return {
+          id: p.id,
+          displayName: p.display_name,
+          skills: await Promise.all(
+            skills.map(async (s) => ({
+              id: s.id,
+              mode: overrides[s.id] ?? "inherit",
+              effectiveEnabled: await isSkillEnabled(ctx.db, s.id, p.id),
+            })),
+          ),
+        };
+      }),
+    );
+    return {
+      skills: skills.map((s) => ({
+        ...s,
+        globalEnabled: !globalDisabled.has(s.id),
+      })),
+      personas,
+    };
+  });
+  app.post<{ Params:{skillId:string}; Body:{enabled?:boolean} }>("/api/v1/admin/skills/:skillId/enabled",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const skill=ctx.worker.listSkills().find((s)=>s.id===req.params.skillId);if(!skill)return reply.code(404).send({error:"skill_not_found"});await setGlobalSkillEnabled(ctx.db,skill.id,Boolean(req.body?.enabled));await writeAudit(ctx.db,"skill_global_toggle",admin.id,{skillId:skill.id,enabled:Boolean(req.body?.enabled)});return {ok:true};});
+  app.get<{ Params:{id:string} }>("/api/v1/admin/personas/:id/skills",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const persona=await getPersona(ctx.db,req.params.id);if(!persona)return reply.code(404).send({error:"persona_not_found"});const overrides=await getPersonaSkillOverrides(ctx.db,persona.id);const globalDisabled=new Set(await getGlobalDisabledSkills(ctx.db));const skills=ctx.worker.listSkills();return {skills:await Promise.all(skills.map(async(s)=>({...s,globalEnabled:!globalDisabled.has(s.id),mode:overrides[s.id]??"inherit",effectiveEnabled:await isSkillEnabled(ctx.db,s.id,persona.id)})))};});
+  app.post<{ Params:{id:string;skillId:string}; Body:{mode?:string} }>("/api/v1/admin/personas/:id/skills/:skillId",async(req,reply)=>{const admin=await requireSuperAdmin(req,reply,ctx);if(!admin)return;const persona=await getPersona(ctx.db,req.params.id);if(!persona)return reply.code(404).send({error:"persona_not_found"});const skill=ctx.worker.listSkills().find((s)=>s.id===req.params.skillId);if(!skill)return reply.code(404).send({error:"skill_not_found"});const mode=req.body?.mode;if(mode!=="on"&&mode!=="off"&&mode!=="inherit")return reply.code(400).send({error:"invalid_mode"});await setPersonaSkillOverride(ctx.db,persona.id,skill.id,mode);await writeAudit(ctx.db,"skill_persona_toggle",admin.id,{personaId:persona.id,skillId:skill.id,mode});return {ok:true};});
 
   app.get("/api/v1/admin/personas", async (req, reply) => {
     const admin = await requireAdmin(req, reply, ctx);

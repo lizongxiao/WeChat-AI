@@ -3854,6 +3854,7 @@
       <button type="button" data-tab="bots"><i class="ico bi bi-robot" aria-hidden="true"></i>机器人</button>
       <button type="button" data-tab="broadcast"><i class="ico bi bi-megaphone" aria-hidden="true"></i>广播</button>
       <button type="button" data-tab="schedules"><i class="ico bi bi-calendar2-check" aria-hidden="true"></i>定时服务</button>
+      <button type="button" data-tab="skills"><i class="ico bi bi-lightning-charge" aria-hidden="true"></i>技能</button>
       <button type="button" data-tab="personas"><i class="ico bi bi-person-vcard" aria-hidden="true"></i>人设</button>
       <button type="button" data-tab="stickers"><i class="ico bi bi-emoji-smile" aria-hidden="true"></i>表情包</button>
       <button type="button" data-tab="audit"><i class="ico bi bi-clipboard-data" aria-hidden="true"></i>审计</button>
@@ -4420,6 +4421,21 @@
         </div>
         <div class="panel schedule-list-panel"><div class="panel-head"><div><h3>系统订阅服务</h3><p class="muted">由管理员配置并按 Persona 开放</p></div></div><div class="table-wrap"><table class="data-table schedule-services-table"><thead><tr><th>服务名称</th><th>开放 Persona</th><th>订阅人数</th><th>执行计划</th><th>状态</th><th class="col-actions">管理</th></tr></thead><tbody id="ssServices"></tbody></table></div></div>
         <div class="panel schedule-list-panel" style="margin-top:18px"><div class="panel-head"><div><h3>用户自建任务</h3><p class="muted">用户通过对话创建并确认的个性化任务</p></div></div><div class="table-wrap"><table class="data-table schedule-tasks-table"><thead><tr><th>用户 / Peer</th><th>Bot</th><th>Persona</th><th>任务</th><th>执行计划</th><th>下次执行</th><th>状态</th><th>来源</th><th class="col-actions">管理</th></tr></thead><tbody id="ssTasks"></tbody></table></div></div>
+      </section>
+
+      <section id="skills">
+        <h1 class="page-title">技能管理</h1>
+        <p class="page-sub">可插拔的确定性对话能力 · 全局开关 + 按人设覆盖；仅超管可见。</p>
+        <div class="panel schedule-list-panel">
+          <div class="panel-head"><div><h3>已注册技能</h3><p class="muted">在 LLM 之前拦截处理；关闭后相关能力对用户不可用</p></div>
+            <button class="btn btn-secondary btn-sm" id="skRefresh" type="button"><i class="bi bi-arrow-clockwise"></i>刷新数据</button>
+          </div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>技能</th><th>说明</th><th>全局状态</th></tr></thead><tbody id="skSkills"></tbody></table></div>
+        </div>
+        <div class="panel schedule-list-panel" style="margin-top:18px">
+          <div class="panel-head"><div><h3>按人设覆盖</h3><p class="muted">三态：跟随全局 / 强制开启 / 强制关闭</p></div></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>Persona</th><th id="skOverrideHead"></th></tr></thead><tbody id="skOverrides"></tbody></table></div>
+        </div>
       </section>
 
       <section id="personas">
@@ -5836,7 +5852,7 @@
       }
     }
 
-    const TAB_IDS = ["dash", "workers", "nodes", "usage", "users", "bots", "broadcast", "schedules", "personas", "stickers", "audit", "stream", "system", "settings"];
+    const TAB_IDS = ["dash", "workers", "nodes", "usage", "users", "bots", "broadcast", "schedules", "skills", "personas", "stickers", "audit", "stream", "system", "settings"];
     function parseHash() {
       const raw = (location.hash || "").replace(/^#/, "");
       if (!raw) return { tab: "dash", params: {} };
@@ -6362,6 +6378,7 @@
       bots: "机器人",
       broadcast: "广播",
       schedules: "定时服务",
+      skills: "技能",
       personas: "人设",
       stickers: "表情包",
       audit: "审计",
@@ -6381,6 +6398,10 @@
       }
       if (tab === "schedules" && !state.isSuperAdmin) {
         toast("仅系统首位管理员可管理定时服务", true);
+        tab = "dash";
+      }
+      if (tab === "skills" && !state.isSuperAdmin) {
+        toast("仅系统首位管理员可管理技能", true);
         tab = "dash";
       }
       if (tab === "stream" && !state.isSuperAdmin) {
@@ -8712,6 +8733,38 @@
       $("ssCreate").onclick = async () => { try { const schemaText=$("ssSchema").value.trim(); const personaIds=Array.from($("ssPersonas").selectedOptions).map(o=>o.value); const body={name:$("ssName").value.trim(),description:$("ssDescription").value.trim(),promptTemplate:$("ssPrompt").value.trim(),paramsSchema:schemaText?JSON.parse(schemaText):{},schedule:cronFromForm(),timezone:$("ssTimezone").value.trim()||"Asia/Shanghai",webSearchEnabled:$("ssWeb").checked,personaIds}; const id=$("ssEditId").value; await api(id?"/api/v1/admin/scheduled-services/"+encodeURIComponent(id):"/api/v1/admin/scheduled-services", {method:id?"PUT":"POST",body}); toast(id?"服务已更新":"服务已创建"); $("ssEditId").value=""; await loadSchedules(true); } catch(e) { toast(e.message || "保存失败", true); } };
     }
 
+    async function loadSkills(force) {
+      if (state.loaded.skills && !force) return;
+      const d = await api("/api/v1/admin/skills");
+      state.loaded.skills = true;
+      state.lastLoaded.skills = Date.now();
+      const skills = d.skills || [];
+      const personas = d.personas || [];
+      $("skSkills").innerHTML = skills.length
+        ? skills.map((s) => `<tr><td><div class="cell-stack"><div class="title-line"><strong>${esc(s.name)}</strong></div><div class="meta-line"><code>${esc(s.id)}</code></div></div></td><td>${esc(s.description || "")}</td><td>${s.globalEnabled ? '<span class="badge ok">启用</span>' : '<span class="badge warn">停用</span>'} <button class="btn btn-secondary btn-sm" data-sk-toggle="${esc(s.id)}" data-sk-enabled="${s.globalEnabled ? "0" : "1"}">${s.globalEnabled ? "全局停用" : "全局启用"}</button></td></tr>`).join("")
+        : '<tr><td colspan="3" class="empty">暂无技能</td></tr>';
+      document.querySelectorAll("[data-sk-toggle]").forEach((b) => b.onclick = async () => {
+        try {
+          await api("/api/v1/admin/skills/" + encodeURIComponent(b.dataset.skToggle) + "/enabled", {method:"POST", body:{enabled:b.dataset.skEnabled === "1"}});
+          toast("全局开关已更新");
+        } catch (e) { toast(e.message || "更新失败", true); }
+        await loadSkills(true);
+      });
+      $("skOverrideHead").textContent = skills.map((s) => esc(s.name)).join("</th><th>");
+      $("skOverrides").innerHTML = personas.length
+        ? personas.map((p) => `<tr><td><div class="cell-stack"><div class="title-line"><strong>${esc(p.displayName)}</strong></div><div class="meta-line"><code>${esc(p.id)}</code></div></div></td>${skills.map((s) => { const st = (p.skills||[]).find((x) => x.id === s.id) || {mode:"inherit", effectiveEnabled:true}; return `<td><div class="cell-stack"><select data-sk-ov="${esc(p.id)}::${esc(s.id)}"><option value="inherit"${st.mode==="inherit"?" selected":""}>跟随全局</option><option value="on"${st.mode==="on"?" selected":""}>强制开启</option><option value="off"${st.mode==="off"?" selected":""}>强制关闭</option></select><div class="meta-line">${st.effectiveEnabled ? '<span class="badge ok">生效</span>' : '<span class="badge warn">未生效</span>'}</div></div></td>`; }).join("")}</tr>`).join("")
+        : '<tr><td colspan="' + (skills.length + 1) + '" class="empty">暂无人设</td></tr>';
+      document.querySelectorAll("[data-sk-ov]").forEach((sel) => sel.onchange = async () => {
+        const [personaId, skillId] = sel.dataset.skOv.split("::");
+        try {
+          await api("/api/v1/admin/personas/" + encodeURIComponent(personaId) + "/skills/" + encodeURIComponent(skillId), {method:"POST", body:{mode:sel.value}});
+          toast("人设技能覆盖已更新");
+        } catch (e) { toast(e.message || "更新失败", true); }
+        await loadSkills(true);
+      });
+      $("skRefresh").onclick = () => loadSkills(true).catch((e) => toast(e.message, true));
+    }
+
     async function loadTab(tab) {
       try {
         clearTabError(tab);
@@ -8724,6 +8777,7 @@
         if (tab === "bots") return await loadBots(state.loaded.bots ? "refresh" : true);
         if (tab === "broadcast") return await loadBroadcast(true);
         if (tab === "schedules") return await loadSchedules(true);
+        if (tab === "skills") return await loadSkills(true);
         if (tab === "personas") return await loadPersonas(state.loaded.personas ? "refresh" : true);
         if (tab === "stickers") return await loadStickers(state.loaded.stickers ? "refresh" : true);
         if (tab === "audit") return await loadAudit(true);

@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash=cd /Users/cc/Projects/WeChat-AI && echo \"=== TODO/FIXME/HACK 统计 ===\" && grep -rn \"TODO\\|FIXME\\|HACK\\|XXX\" --include=\"*.ts\" --include=\"*.mjs\" --include=\"*.html\" apps packages scripts 2>/dev/null | grep -v \".test.ts\" | grep -v node_modules | head -30; echo \"=== 文件大小 Top ===\" && find apps packages -name \"*.ts\" -not -path \"*/node_modules/*\" | xargs wc -l | sort -rn | head -12"]

@@ -60,6 +60,8 @@ import {
   takeScheduledOutbox,
   saveScheduledOutbox,
   WORKER_STALE_SEC,
+  isSkillEnabled,
+  resolvePersonaForPeer,
 } from "@wechat-ai/db";
 import { tryApplyOtaUpdate } from "./ota-apply.js";
 import {
@@ -69,6 +71,9 @@ import {
   sanitizePartsStripStickerJson,
   stripAllStickerJson,
   attachMissedDeliveryNotice,
+  CommandRegistry,
+  SkillRunner,
+  buildHelpCommand,
   type ChatService,
   type InboundChatResult,
   type HumanDelayOptions,
@@ -90,7 +95,7 @@ import {
   type AdminSendResult,
 } from "./broadcast-runner.js";
 import { ScheduledScheduler, type KeepAliveSchedulerConfig } from "./scheduled-scheduler.js";
-import { handleScheduledChatTool } from "./scheduled-chat-tools.js";
+import { scheduledSkill } from "./scheduled-chat-tools.js";
 import { emitActivity, previewText } from "./activity-stream.js";
 import { scheduledReplyParts } from "./scheduled-reply-delivery.js";
 import { newerContextToken } from "./scheduled-send-token.js";
@@ -346,6 +351,10 @@ export class BotWorkerManager {
   private broadcast: BroadcastRunner | null = null;
   /** Confirmed subscription/task executions; independent from proactive scans. */
   private scheduled: ScheduledScheduler | null = null;
+  /** Unified `/command` registry (help, skill commands, P2P commands). */
+  private readonly commands = new CommandRegistry();
+  /** Pluggable deterministic skills (scheduled…); enabled per global/persona. */
+  private readonly skills: SkillRunner;
   /** Dedicated Redis connection for SUBSCRIBE (cannot share with command client). */
   private wakeSub: ReturnType<Db["redis"]["duplicate"]> | null = null;
   private wakeDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -397,10 +406,50 @@ export class BotWorkerManager {
     if (this.p2pEnabled) {
       this.p2p = new P2PService(opts.db, opts.p2p ?? {});
     }
+    // Skill runner: deterministic capabilities gated by global/persona toggles.
+    this.skills = new SkillRunner([scheduledSkill], {
+      isEnabled: async (skillId, ctx) => {
+        let personaId: string | null = null;
+        try {
+          personaId =
+            (await resolvePersonaForPeer(opts.db, ctx.botId, ctx.peerId))
+              ?.id ?? null;
+        } catch {
+          /* non-fatal: fall back to global toggle */
+        }
+        return isSkillEnabled(opts.db, skillId, personaId);
+      },
+    });
+    // `/帮助` + P2P commands share one registry so the menu lists everything.
+    this.commands.register(
+      buildHelpCommand(this.commands, {
+        header: "微信 AI 助手",
+        extraSection: async (ctx) => {
+          const enabled = await this.skills.describe({
+            db: opts.db,
+            botId: ctx.botId,
+            peerId: ctx.peerId,
+            text: ctx.text,
+          });
+          if (!enabled.length) return null;
+          return `当前技能：\n${enabled
+            .map((s) => `· ${s.name} — ${s.description}`)
+            .join("\n")}`;
+        },
+      }),
+    );
+    this.p2p?.registerCommands(this.commands);
   }
 
   getWorkerId(): string {
     return this.workerId;
+  }
+
+  /** Registered skills metadata for the admin panel (toggles live in Redis). */
+  listSkills(): { id: string; name: string; description: string }[] {
+    return this.skills
+      .list()
+      .map((s) => ({ id: s.id, name: s.name, description: s.description }));
   }
 
   /**
@@ -571,6 +620,7 @@ export class BotWorkerManager {
       if (this.p2pEnabled && !this.p2p) {
         // Booted with P2P off: construct on first enable.
         this.p2p = new P2PService(this.opts.db, this.opts.p2p ?? {});
+        this.p2p.registerCommands(this.commands);
       }
     }
   }
@@ -2411,6 +2461,66 @@ export class BotWorkerManager {
       return;
     }
 
+    // ── Unified commands (no LLM): /帮助, skill commands, P2P commands ──
+    try {
+      const commandResult = await this.commands.run({
+        db: this.opts.db,
+        botId: job.botId,
+        peerId: job.peerId,
+        text: job.text,
+        mediaOnly: job.mediaOnly || !job.text.trim(),
+      });
+      if (commandResult?.handled) {
+        if (commandResult.reply?.trim()) {
+          await client.sendText({
+            toUserId: job.peerId,
+            text: commandResult.reply.trim(),
+            contextToken: job.contextToken,
+          });
+          emitActivity({
+            type: "message.out",
+            source: this.workerId,
+            summary: `out command bot=${job.botId} peer=${job.peerId}`,
+            data: streamMessagePayload(commandResult.reply.trim(), {
+              botId: job.botId,
+              peerId: job.peerId,
+              role: "assistant",
+              channel: "command",
+              jobId: job.id,
+            }),
+          });
+        }
+        for (const remote of commandResult.remoteSends ?? []) {
+          await this.sendToEndpoint(
+            remote.botId,
+            remote.peerId,
+            remote.text,
+          );
+        }
+        this.jobsProcessed++;
+        emitActivity({
+          type: "worker.job",
+          source: this.workerId,
+          summary: `command handled bot=${job.botId} peer=${job.peerId} ${Date.now() - t0}ms`,
+          data: {
+            botId: job.botId,
+            peerId: job.peerId,
+            jobId: job.id,
+            kind: "command",
+            ms: Date.now() - t0,
+          },
+        });
+        return;
+      }
+    } catch (err) {
+      this.opts.log?.(
+        `[worker] command dispatch failed peer=${job.peerId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      // Fall through to P2P/roleplay rather than hard-fail chat
+    }
+
     // ── P2P intercept (no LLM) ───────────────────────────
     if (this.p2pEnabled && this.p2p) {
       try {
@@ -2496,18 +2606,20 @@ export class BotWorkerManager {
       return;
     }
 
-    // Scheduling requests are handled by a deterministic capability before the
+    // Deterministic skills (e.g. scheduled tasks) intercept before the
     // general LLM turn. This is the confirmation/security boundary: text the
     // model generates cannot itself create, modify, or delete Redis records.
-    const scheduledReply = await handleScheduledChatTool(this.opts.db, {
+    const skillReply = await this.skills.run({
+      db: this.opts.db,
       botId: job.botId,
       peerId: job.peerId,
       text: job.text,
+      mediaOnly: job.mediaOnly || !job.text.trim(),
     });
-    if (scheduledReply) {
+    if (skillReply) {
       await client.sendText({
         toUserId: job.peerId,
-        text: scheduledReply,
+        text: skillReply,
         contextToken: job.contextToken,
       });
       this.jobsProcessed++;

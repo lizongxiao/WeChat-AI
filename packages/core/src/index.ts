@@ -98,6 +98,21 @@ export {
   type P2PRemoteSend,
 } from "./p2p-service.js";
 export {
+  CommandRegistry,
+  buildHelpCommand,
+  commandReply,
+  type ChatCommand,
+  type CommandContext,
+  type CommandResult,
+  type HelpCommandOptions,
+} from "./commands/index.js";
+export {
+  SkillRunner,
+  type ChatSkill,
+  type SkillContext,
+  type SkillFilter,
+} from "./skills/index.js";
+export {
   TryChatService,
   TryChatError,
   type TryChatServiceOptions,

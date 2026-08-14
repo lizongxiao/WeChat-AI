@@ -2,7 +2,12 @@
  * The chat scheduling boundary.  These are deliberately server-side tools:
  * the model may select a tool, but it never receives a Redis client or task id
  * outside the current bot/peer scope.
+ *
+ * Exposed to the chat pipeline as the pluggable `scheduledSkill` (see the
+ * skill system in @wechat-ai/core); `handleScheduledChatTool` stays exported
+ * for direct/legacy callers and tests.
  */
+import type { ChatSkill } from "@wechat-ai/core";
 import {
   clearPendingScheduledPlan,
   createScheduledTask,
@@ -212,8 +217,7 @@ function pendingTaskConfirmation(parsed:ParsedPlan,personaName:string){
 }
 
 /** Compatibility adapter until the general chat tool runner exposes arbitrary tools. */
-export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:string;text:string}) : Promise<string|null> {
-  const text=input.text.trim();
+export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:string;text:string}) : Promise<string|null> {  const text=input.text.trim();
   const pending=await getPendingScheduledPlan(db,input.botId,input.peerId);
   if(pending){
     if(NO.test(text))return cancel_scheduled_task(db,{...input});
@@ -280,3 +284,20 @@ export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:s
   if(target&&/(暂停|恢复|启用|改成|改为)/.test(text)){const parsed=parseScheduledTask(`${text} 提醒我`);const patch=parsed&&!("question" in parsed)?{schedule:parsed.schedule,schedule_type:parsed.schedule_type,execute_at:parsed.execute_at||null,timezone:parsed.timezone}:{enabled:/暂停/.test(text)?0:1};return update_scheduled_task(db,{...input,taskId:target.id,patch,summary:/暂停/.test(text)?"暂停":/恢复|启用/.test(text)?"恢复启用":"修改执行时间"});}
   return prepare_scheduled_task(db,input);
 }
+
+/**
+ * The scheduled capability as a pluggable skill. Deterministic interception
+ * (regex + confirmation boundary) — no LLM-generated text can reach Redis.
+ */
+export const scheduledSkill: ChatSkill = {
+  id: "scheduled",
+  name: "定时任务",
+  description:
+    "创建/查看/修改/取消定时提醒与推送订阅（说“每天 8 点提醒我…”或“订阅 + 服务名”）",
+  handle: async (ctx) =>
+    handleScheduledChatTool(ctx.db, {
+      botId: ctx.botId,
+      peerId: ctx.peerId,
+      text: ctx.text,
+    }),
+};

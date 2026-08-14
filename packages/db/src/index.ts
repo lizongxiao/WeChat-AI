@@ -10,6 +10,7 @@ export * from "./repos.js";
 export * from "./p2p-repos.js";
 export * from "./broadcast-repos.js";
 export * from "./scheduled-repos.js";
+export * from "./skill-repos.js";
 export * from "./bot-login-repos.js";
 export * from "./seed.js";
 export * from "./worker-fleet.js";

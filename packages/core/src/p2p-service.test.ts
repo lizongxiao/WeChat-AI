@@ -11,6 +11,7 @@ import {
   nowIso,
 } from "@wechat-ai/db";
 import { P2PService, isP2PCommand, parseAtUsername } from "./p2p-service.js";
+import { CommandRegistry } from "./commands/index.js";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 
@@ -60,6 +61,26 @@ describe("P2PService (Redis)", () => {
     }
   }
 
+  /** Commands are dispatched through the unified registry (worker path). */
+  function registryFor(svc: P2PService): CommandRegistry {
+    const registry = new CommandRegistry();
+    svc.registerCommands(registry);
+    return registry;
+  }
+
+  function runCommand(
+    registry: CommandRegistry,
+    db: ReturnType<typeof openDatabase>,
+    req: { botId: string; peerId: string; text: string },
+  ) {
+    return registry.run({
+      db,
+      botId: req.botId,
+      peerId: req.peerId,
+      text: req.text,
+    });
+  }
+
   it("bind code once + whoami + unbind", async (t) => {
     await withDb(t, async (db) => {
       const suffix = Date.now().toString(36);
@@ -86,43 +107,44 @@ describe("P2PService (Redis)", () => {
 
       const codeRec = await createBindCode(db, userId, `alice_${suffix}`, 600);
       const svc = new P2PService(db);
+      const registry = registryFor(svc);
 
-      const bad = await svc.handleInbound({
+      const bad = await runCommand(registry, db, {
         botId,
         peerId,
         text: "/绑定 WRONG1",
       });
-      assert.equal(bad.handled, true);
-      assert.match(bad.localReplies[0]!, /无效|过期/);
+      assert.ok(bad?.handled);
+      assert.match(bad!.reply!, /无效|过期/);
 
-      const ok = await svc.handleInbound({
+      const ok = await runCommand(registry, db, {
         botId,
         peerId,
         text: `/绑定 ${codeRec.code}`,
       });
-      assert.equal(ok.handled, true);
-      assert.match(ok.localReplies[0]!, /已绑定/);
+      assert.ok(ok?.handled);
+      assert.match(ok!.reply!, /已绑定/);
 
-      const again = await svc.handleInbound({
+      const again = await runCommand(registry, db, {
         botId,
         peerId,
         text: `/绑定 ${codeRec.code}`,
       });
-      assert.match(again.localReplies[0]!, /无效|过期/);
+      assert.match(again!.reply!, /无效|过期/);
 
-      const who = await svc.handleInbound({
+      const who = await runCommand(registry, db, {
         botId,
         peerId,
         text: "/我的身份",
       });
-      assert.match(who.localReplies[0]!, new RegExp(`alice_${suffix}`));
+      assert.match(who!.reply!, new RegExp(`alice_${suffix}`));
 
-      const un = await svc.handleInbound({
+      const un = await runCommand(registry, db, {
         botId,
         peerId,
         text: "/解绑",
       });
-      assert.match(un.localReplies[0]!, /解除/);
+      assert.match(un!.reply!, /解除/);
     });
   });
 
@@ -174,6 +196,7 @@ describe("P2PService (Redis)", () => {
       await upsertContextToken(db, botA, peerA, "ctx-alice");
 
       const svc = new P2PService(db, { maxRequestsPerDay: 50 });
+      const registry = registryFor(svc);
 
       // fallthrough when unbound style message
       const fall = await svc.handleInbound({
@@ -202,15 +225,15 @@ describe("P2PService (Redis)", () => {
       assert.equal(req.remoteSends[0]!.botId, botB);
       assert.match(req.remoteSends[0]!.text, /对话请求/);
 
-      const accept = await svc.handleInbound({
+      const accept = await runCommand(registry, db, {
         botId: botB,
         peerId: peerB,
         text: "/同意",
       });
-      assert.equal(accept.handled, true);
-      assert.match(accept.localReplies[0]!, /建立对话/);
-      assert.equal(accept.remoteSends.length, 1);
-      assert.equal(accept.remoteSends[0]!.botId, botA);
+      assert.ok(accept?.handled);
+      assert.match(accept!.reply!, /建立对话/);
+      assert.equal(accept!.remoteSends!.length, 1);
+      assert.equal(accept!.remoteSends![0]!.botId, botA);
 
       const relay = await svc.handleInbound({
         botId: botA,
@@ -226,14 +249,14 @@ describe("P2PService (Redis)", () => {
       );
       assert.equal(relay.remoteSends[0]!.botId, botB);
 
-      const disc = await svc.handleInbound({
+      const disc = await runCommand(registry, db, {
         botId: botB,
         peerId: peerB,
         text: "/断开",
       });
-      assert.equal(disc.handled, true);
-      assert.match(disc.localReplies[0]!, /断开/);
-      assert.equal(disc.remoteSends[0]!.botId, botA);
+      assert.ok(disc?.handled);
+      assert.match(disc!.reply!, /断开/);
+      assert.equal(disc!.remoteSends![0]!.botId, botA);
 
       const after = await svc.handleInbound({
         botId: botA,

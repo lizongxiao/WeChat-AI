@@ -31,6 +31,12 @@ import {
   type UserWechatBind,
   nowIso,
 } from "@wechat-ai/db";
+import {
+  CommandRegistry,
+  type CommandContext,
+  type CommandResult,
+  type P2PRemoteSend,
+} from "./commands/index.js";
 
 export interface P2PServiceOptions {
   bindCodeTtlSec: number;
@@ -45,12 +51,6 @@ export interface P2PInboundRequest {
   peerId: string;
   text: string;
   mediaOnly?: boolean;
-}
-
-export interface P2PRemoteSend {
-  botId: string;
-  peerId: string;
-  text: string;
 }
 
 export interface P2PHandleResult {
@@ -113,26 +113,12 @@ export class P2PService {
     const text = (req.text ?? "").trim();
     const mediaOnly = Boolean(req.mediaOnly) || !text;
 
-    // Command matching is pure regex and already takes precedence over relay,
-    // so run it BEFORE loading the session. Every ordinary roleplay message
-    // used to pay a Redis GET here just to find no session.
+    // Commands (/绑定 /同意 …) are registered in the unified command system
+    // via registerCommands() and dispatched before this method — see
+    // BotWorkerManager. Here we only handle @username requests, active-session
+    // relay, and media-only guards. This keeps every ordinary roleplay message
+    // from paying a Redis GET just to find no session.
     if (!mediaOnly) {
-      const bindMatch = text.match(BIND_RE);
-      if (bindMatch) return this.handleBind(req, bindMatch[1]!);
-
-      if (UNBIND_RE.test(text)) return this.handleUnbind(req);
-      if (WHOAMI_RE.test(text)) return this.handleWhoami(req);
-      if (ACCEPT_RE.test(text)) return this.handleAccept(req);
-      if (REJECT_RE.test(text)) return this.handleReject(req);
-      if (DISCONNECT_RE.test(text)) return this.handleDisconnect(req);
-      if (CANCEL_RE.test(text)) return this.handleCancel(req);
-
-      const blockMatch = text.match(BLOCK_RE);
-      if (blockMatch) return this.handleBlock(req, blockMatch[1]!);
-      const unblockMatch = text.match(UNBLOCK_RE);
-      if (unblockMatch) return this.handleUnblock(req, unblockMatch[1]!);
-      if (BLOCKLIST_RE.test(text)) return this.handleBlockList(req);
-
       const atMatch = text.match(AT_USER_RE);
       if (atMatch) return this.handleAt(req, atMatch[1]!);
     }
@@ -152,6 +138,74 @@ export class P2PService {
     }
 
     return fallthrough();
+  }
+
+  /**
+   * Register every P2P command into the unified command registry. The worker
+   * runs the registry before this service's relay logic, so commands keep
+   * taking precedence over relay exactly as before.
+   */
+  registerCommands(registry: CommandRegistry): void {
+    const cmd = (
+      name: string,
+      description: string,
+      usage: string | undefined,
+      run: (ctx: CommandContext) => Promise<P2PHandleResult>,
+    ) =>
+      registry.register({
+        name,
+        description,
+        usage,
+        handler: async (ctx) => this.toCommandResult(await run(ctx)),
+      });
+
+    cmd("绑定", "绑定 LINUX DO 账号", "/绑定 <验证码>", (ctx) =>
+      this.handleBind(this.toReq(ctx), ctx.args),
+    );
+    cmd("解绑", "解除 LINUX DO 账号绑定", "/解绑", (ctx) =>
+      this.handleUnbind(this.toReq(ctx)),
+    );
+    cmd("我的身份", "查看绑定账号与对话状态", "/我的身份", (ctx) =>
+      this.handleWhoami(this.toReq(ctx)),
+    );
+    cmd("同意", "同意对方的对话请求", "/同意", (ctx) =>
+      this.handleAccept(this.toReq(ctx)),
+    );
+    cmd("拒绝", "拒绝对方的对话请求", "/拒绝", (ctx) =>
+      this.handleReject(this.toReq(ctx)),
+    );
+    cmd("断开", "结束当前对话", "/断开", (ctx) =>
+      this.handleDisconnect(this.toReq(ctx)),
+    );
+    cmd("取消请求", "取消发出的对话请求", "/取消请求", (ctx) =>
+      this.handleCancel(this.toReq(ctx)),
+    );
+    cmd("拉黑", "拉黑用户", "/拉黑 <@用户名>", (ctx) =>
+      this.handleBlock(this.toReq(ctx), ctx.args.replace(/^@/, "")),
+    );
+    cmd("取消拉黑", "移出黑名单", "/取消拉黑 <@用户名>", (ctx) =>
+      this.handleUnblock(this.toReq(ctx), ctx.args.replace(/^@/, "")),
+    );
+    cmd("黑名单", "查看黑名单", "/黑名单", (ctx) =>
+      this.handleBlockList(this.toReq(ctx)),
+    );
+  }
+
+  private toReq(ctx: CommandContext): P2PInboundRequest {
+    return {
+      botId: ctx.botId,
+      peerId: ctx.peerId,
+      text: ctx.text,
+      mediaOnly: ctx.mediaOnly,
+    };
+  }
+
+  private toCommandResult(r: P2PHandleResult): CommandResult {
+    return {
+      handled: r.handled,
+      reply: r.localReplies.length ? r.localReplies.join("\n") : undefined,
+      remoteSends: r.remoteSends,
+    };
   }
 
   // ── Bind ─────────────────────────────────────────────
@@ -610,4 +664,4 @@ export function isP2PCommand(text: string): boolean {
   );
 }
 
-export type { PeerEndpoint, PeerIdentity };
+export type { PeerEndpoint, PeerIdentity, P2PRemoteSend };

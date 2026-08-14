@@ -239,4 +239,14 @@ export const K = {
   streamChannel: "wa:stream:events",
   /** LIST of recent stream events JSON (newest first, LTRIM) */
   streamRecent: "wa:stream:recent",
+
+  // ── Skills (pluggable chat capabilities) ───────────────
+  /** SET of globally disabled skill ids */
+  skillsDisabledGlobal: "wa:skills:disabled",
+  /** SET of skill ids explicitly enabled for a persona (overrides global) */
+  skillsEnabledPersona: (personaId: string) =>
+    `wa:skills:persona:${personaId}:enabled`,
+  /** SET of skill ids explicitly disabled for a persona (overrides global) */
+  skillsDisabledPersona: (personaId: string) =>
+    `wa:skills:persona:${personaId}:disabled`,
 };

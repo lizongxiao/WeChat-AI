@@ -56,6 +56,10 @@ export interface ScheduledSchedulerOptions {
     text: string,
   ) => Promise<ScheduledSendResult>;
   keepAlive?: KeepAliveSchedulerConfig;
+  /** Catch-up window after a scheduled instant (ms). Default 10 minutes. */
+  missedGraceMs?: number;
+  /** Concurrent due-item execution cap (per-peer serialized, cross-peer parallel). */
+  runConcurrency?: number;
 }
 export interface ScheduledTestProgress {
   level: "info" | "warn" | "error";
@@ -75,6 +79,92 @@ export function scheduledPreviewTime(schedule:string, timezone:string, now=new D
 function minuteKey(d:Date){return d.toISOString().slice(0,16);}
 /** Manual smoke tests must not share the production schedule's dedupe key. */
 export function scheduledTestLockSource(source:"task"|"subscription",runId?:string){return `${source}:test${runId?`:${runId}`:""}`;}
+
+/**
+ * Due decision is based on next_run_at expiry instead of "does the current
+ * minute happen to match the cron". A slow LLM generation, a restart, or a
+ * busy tick used to skip the configured minute entirely and the item would
+ * silently wait for the next period. Now:
+ *  - next_run_at expired within grace → execute now (catch-up)
+ *  - expired beyond grace → skip this period and advance (mark missed)
+ *  - one_time items retry after failures inside their grace window
+ */
+export interface ScheduledDueInput {
+  enabled: boolean;
+  scheduleType: "cron" | "one_time";
+  schedule: string;
+  timezone: string;
+  executeAt?: string | null;
+  nextRunAt?: string | null;
+  lastRunAt?: string | null;
+  lastStatus?: string | null;
+  now: Date;
+  /** Catch-up window after next_run_at / execute_at (ms). */
+  graceMs: number;
+  /** one_time retry backoff after a failed attempt (ms). */
+  retryBackoffMs: number;
+}
+
+export type ScheduledDueSkipReason =
+  | "disabled"
+  | "future"
+  | "missed_window"
+  | "backoff"
+  | "no_execute_at"
+  | "initialized";
+
+export interface ScheduledDueDecision {
+  due: boolean;
+  /** cron: next_run_at to persist (initialize / advance / advance-over-missed). */
+  setNextRunAt?: string | null;
+  /** one_time: grace expired without success → disable the task. */
+  disable?: boolean;
+  skipReason?: ScheduledDueSkipReason;
+}
+
+export const DEFAULT_MISSED_GRACE_MS = 10 * 60_000;
+export const DEFAULT_ONE_TIME_RETRY_BACKOFF_MS = 60_000;
+
+export function decideScheduledDue(input: ScheduledDueInput): ScheduledDueDecision {
+  if (!input.enabled) return { due: false, skipReason: "disabled" };
+  const nowMs = input.now.getTime();
+
+  if (input.scheduleType === "one_time") {
+    const executeMs = input.executeAt ? Date.parse(input.executeAt) : NaN;
+    if (!Number.isFinite(executeMs)) {
+      return { due: false, skipReason: "no_execute_at" };
+    }
+    if (executeMs > nowMs) return { due: false, skipReason: "future" };
+    if (input.lastStatus === "sent") return { due: false };
+    const lastRunMs = input.lastRunAt ? Date.parse(input.lastRunAt) : NaN;
+    if (
+      Number.isFinite(lastRunMs) &&
+      nowMs - lastRunMs < input.retryBackoffMs
+    ) {
+      return { due: false, skipReason: "backoff" };
+    }
+    if (nowMs - executeMs > input.graceMs) {
+      return { due: false, disable: true, skipReason: "missed_window" };
+    }
+    return { due: true };
+  }
+
+  // cron: expiry-driven scheduling on next_run_at
+  const nextMs = input.nextRunAt ? Date.parse(input.nextRunAt) : NaN;
+  if (!Number.isFinite(nextMs)) {
+    return {
+      due: false,
+      setNextRunAt: nextCronRun(input.schedule, input.timezone, input.now),
+      skipReason: "initialized",
+    };
+  }
+  if (nextMs > nowMs) return { due: false, skipReason: "future" };
+  const advanced = nextCronRun(input.schedule, input.timezone, input.now);
+  if (nowMs - nextMs > input.graceMs) {
+    return { due: false, setNextRunAt: advanced, skipReason: "missed_window" };
+  }
+  return { due: true, setNextRunAt: advanced };
+}
 
 /** Built-in fallbacks when subscription params are blank (common in smoke tests). */
 export const SCHEDULED_PARAM_DEFAULTS: Record<string, string> = {
@@ -245,45 +335,146 @@ export class ScheduledScheduler {
   private peerKey(botId: string, peerId: string): string {
     return `${botId}\0${peerId}`;
   }
-  private arm(ms:number){if(this.stopped)return;this.timer=setTimeout(()=>void this.tick().catch(e=>this.opts.log?.(`[schedule] tick error ${e instanceof Error?e.message:String(e)}`)).finally(()=>this.arm(this.opts.intervalSec*1000)),ms);}
+  private arm(ms:number){if(this.stopped)return;this.timer=setTimeout(()=>void this.tick().catch(e=>this.opts.log?.(`[schedule] tick error ${e instanceof Error?e.message:String(e)}`)).finally(()=>this.armAligned()),ms);}
+  /**
+   * Re-arm on the fixed interval boundary (epoch-aligned) instead of
+   * "last tick end + interval". Serial LLM generations used to push every
+   * subsequent tick later and later, so ticks drifted across the configured
+   * minute boundaries.
+   */
+  private armAligned(){
+    if(this.stopped)return;
+    const intervalMs=this.opts.intervalSec*1000;
+    const nowMs=Date.now();
+    const next=Math.ceil(nowMs/intervalMs)*intervalMs;
+    const delay=Math.max(200,next-nowMs);
+    this.timer=setTimeout(()=>void this.tick().catch(e=>this.opts.log?.(`[schedule] tick error ${e instanceof Error?e.message:String(e)}`)).finally(()=>this.armAligned()),delay);
+  }
   async tick(now=new Date()){
-    if(this.stopped||this.running)return {sent:0,skipped:0};
+    if(this.stopped||this.running)return {sent:0,skipped:0,missed:0};
     this.running=true;
-    let sent=0,skipped=0;
+    let sent=0,skipped=0,missed=0;
     const delivered=new Set<string>();
+    const graceMs=this.opts.missedGraceMs ?? DEFAULT_MISSED_GRACE_MS;
+    type DueRun = {
+      key: string;
+      run: () => Promise<{sent:true}|{sent:false;reason:string}>;
+      after: (r:{sent:true}|{sent:false;reason:string}) => Promise<void>;
+    };
+    const dueRuns: DueRun[] = [];
     try {
       const [tasks,subs]=await Promise.all([listScheduledTasks(this.opts.db),listUserSubscriptions(this.opts.db)]);
       for(const task of tasks){
         const oneTime=task.schedule_type==="one_time";
-        const executeAt=task.execute_at?new Date(task.execute_at):null;
-        const due=task.enabled&&(oneTime?Boolean(executeAt&&executeAt.getTime()<=now.getTime()&&!task.last_run_at):cronMatches(task.schedule,now,task.timezone));
-        if(!oneTime&&(!task.next_run_at||due))await updateScheduledTask(this.opts.db,task.id,{next_run_at:nextCronRun(task.schedule,task.timezone,now)});
-        if(!due)continue;
-        const result=await this.run("task",task.id,task.bot_id,task.peer_id,task.persona_id,task.prompt,Boolean(task.web_search_enabled),now,"task",now,task.timezone);
-        if(result.sent){
-          sent++;
-          delivered.add(this.peerKey(task.bot_id,task.peer_id));
-          if(oneTime)await updateScheduledTask(this.opts.db,task.id,{enabled:0,next_run_at:null});
-        } else skipped++;
+        const decision=decideScheduledDue({
+          enabled:Boolean(task.enabled),
+          scheduleType:oneTime?"one_time":"cron",
+          schedule:task.schedule,
+          timezone:task.timezone,
+          executeAt:task.execute_at,
+          nextRunAt:task.next_run_at,
+          lastRunAt:task.last_run_at,
+          lastStatus:task.last_status,
+          now,
+          graceMs,
+          retryBackoffMs:DEFAULT_ONE_TIME_RETRY_BACKOFF_MS,
+        });
+        if(decision.disable){
+          await updateScheduledTask(this.opts.db,task.id,{enabled:0,last_status:"missed",last_error:"one_time_grace_expired"}).catch(()=>undefined);
+          missed++;
+          continue;
+        }
+        if(decision.setNextRunAt&&decision.setNextRunAt!==task.next_run_at){
+          await updateScheduledTask(this.opts.db,task.id,{next_run_at:decision.setNextRunAt}).catch(()=>undefined);
+        }
+        if(decision.skipReason==="missed_window")missed++;
+        if(!decision.due)continue;
+        const key=this.peerKey(task.bot_id,task.peer_id);
+        dueRuns.push({
+          key,
+          run:()=>this.run("task",task.id,task.bot_id,task.peer_id,task.persona_id,task.prompt,Boolean(task.web_search_enabled),now,"task",now,task.timezone),
+          after:async(result)=>{
+            if(result.sent){
+              sent++;
+              delivered.add(key);
+              if(oneTime)await updateScheduledTask(this.opts.db,task.id,{enabled:0}).catch(()=>undefined);
+            } else skipped++;
+          },
+        });
       }
       for(const sub of subs){
         if(!(await isUserSubscriptionActiveForCurrentPersona(this.opts.db,sub)))continue;
         const service=await getSystemSubscriptionService(this.opts.db,sub.service_id);
         if(!service?.enabled||!(await isServiceOpenToPersona(this.opts.db,service.id,sub.persona_id)))continue;
-        const due=cronMatches(service.schedule,now,service.timezone);
-        if(!sub.next_run_at||due)await updateUserSubscription(this.opts.db,sub.id,{next_run_at:nextCronRun(service.schedule,service.timezone,now)});
-        if(!due)continue;
+        const decision=decideScheduledDue({
+          enabled:Boolean(sub.enabled),
+          scheduleType:"cron",
+          schedule:service.schedule,
+          timezone:service.timezone,
+          nextRunAt:sub.next_run_at,
+          now,
+          graceMs,
+          retryBackoffMs:DEFAULT_ONE_TIME_RETRY_BACKOFF_MS,
+        });
+        if(decision.setNextRunAt&&decision.setNextRunAt!==sub.next_run_at){
+          await updateUserSubscription(this.opts.db,sub.id,{next_run_at:decision.setNextRunAt}).catch(()=>undefined);
+        }
+        if(decision.skipReason==="missed_window")missed++;
+        if(!decision.due)continue;
         const resolved=resolveScheduledParams(sub.params,service.params_schema);
         const prompt=interpolate(service.prompt_template,resolved.params);
-        const result=await this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,"subscription",now,service.timezone,undefined,locationHintFromParams(resolved.params));
-        if(result.sent){
-          sent++;
-          delivered.add(this.peerKey(sub.bot_id,sub.peer_id));
-        } else skipped++;
+        const key=this.peerKey(sub.bot_id,sub.peer_id);
+        dueRuns.push({
+          key,
+          run:()=>this.run("subscription",sub.id,sub.bot_id,sub.peer_id,sub.persona_id,prompt,Boolean(service.web_search_enabled),now,"subscription",now,service.timezone,undefined,locationHintFromParams(resolved.params)),
+          after:async(result)=>{
+            if(result.sent){
+              sent++;
+              delivered.add(key);
+            } else skipped++;
+          },
+        });
       }
+      await this.executeDueRuns(dueRuns,this.opts.runConcurrency ?? 4);
       await this.scanKeepAlive(now, tasks, subs, delivered);
     } finally {this.running=false;}
-    return {sent,skipped};
+    return {sent,skipped,missed};
+  }
+
+  /**
+   * Execute due items with bounded concurrency: items of the same peer run
+   * serially (message order + per-peer rate), different peers run in parallel
+   * so one slow LLM generation no longer delays every other subscriber's
+   * scheduled instant.
+   */
+  private async executeDueRuns(
+    runs: Array<{
+      key: string;
+      run: () => Promise<{sent:true}|{sent:false;reason:string}>;
+      after: (r:{sent:true}|{sent:false;reason:string}) => Promise<void>;
+    }>,
+    concurrency: number,
+  ): Promise<void> {
+    if(!runs.length)return;
+    const byPeer=new Map<string, typeof runs>();
+    for(const r of runs){
+      const g=byPeer.get(r.key);
+      if(g)g.push(r);
+      else byPeer.set(r.key,[r]);
+    }
+    const groups=[...byPeer.values()];
+    let idx=0;
+    const worker=async()=>{
+      while(idx<groups.length){
+        const group=groups[idx++]!;
+        for(const r of group){
+          const result=await r.run();
+          await r.after(result);
+        }
+      }
+    };
+    const workers=Math.min(Math.max(1,concurrency),groups.length);
+    await Promise.all(Array.from({length:workers},worker));
   }
   private async run(source:"task"|"subscription",id:string,botId:string,peerId:string,personaId:string,prompt:string,web:boolean,now:Date,lockSource:string=source,executionTime:Date=now,timeZone="Asia/Shanghai",onProgress?:ScheduledTestProgressHandler,locationHint?:string):Promise<{sent:true}|{sent:false;reason:string}>{
     const key=minuteKey(now);

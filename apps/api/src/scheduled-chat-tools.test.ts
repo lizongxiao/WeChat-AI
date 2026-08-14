@@ -134,10 +134,18 @@ describe("scheduled chat tool contract", () => {
     assert.match((await ask("每天提醒我喝水")) ?? "", /几点/);
     assert.match((await ask("上午九点")) ?? "", /准备创建定时任务/);
     assert.match((await ask("确认")) ?? "", /已创建/);
+    // Regression for the conversational completion shown in production: a
+    // spaced clock must advance the pending draft instead of asking again.
+    assert.match((await ask("每天开盘前给你返回黄金实时价格，创建定时任务")) ?? "", /几点/);
+    const goldPlan = await ask("每天 8 点");
+    assert.match(goldPlan ?? "", /准备创建定时任务/);
+    assert.match(goldPlan ?? "", /每天 08:00/);
+    assert.match((await ask("确认")) ?? "", /已创建/);
     const tasks = await listPeerScheduledTasks(db, botId, peerId);
-    assert.equal(tasks.length, 2);
+    assert.equal(tasks.length, 3);
     assert.ok(tasks.some(task=>task.schedule==="30 8 * * *"));
     assert.ok(tasks.some(task=>task.schedule==="0 9 * * *"));
+    assert.ok(tasks.some(task=>task.schedule==="0 8 * * *"));
 
     const beforeSubscription = await ask("这个人设有哪些定时任务");
     assert.match(beforeSubscription ?? "", /晨间天气/);
@@ -149,7 +157,7 @@ describe("scheduled chat tool contract", () => {
     assert.match((await ask("嗯，确认")) ?? "", /已订阅/);
     const overview = await ask("我现在订阅了什么");
     assert.match(overview ?? "", /\[系统订阅\].*晨间天气.*上海/);
-    assert.doesNotMatch(overview ?? "", /当前人设还可以订阅/);
+    assert.ok(tasks.some(task=>task.name.includes("黄金实时价格")));
 
     await deleteSystemSubscriptionService(db, service.id);
     await db.close();

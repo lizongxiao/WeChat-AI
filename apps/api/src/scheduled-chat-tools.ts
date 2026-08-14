@@ -47,7 +47,7 @@ const SCHEDULE_SIGNAL =
   /(?:每天|每日|工作日|每周[一二三四五六日天、，,\s]*|今天|明天)/;
 const ACTION_SIGNAL =
   /(?:提醒|通知|叫我|喊我|发送|发给我|给我发|推送|播报|告诉我|定时任务)/;
-const CLOCK_TOKEN = /(?:凌晨|早上|上午|中午|下午|晚上)?\s*(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})(?:点|时|:|：)/;
+const CLOCK_TOKEN = /(?:凌晨|早上|上午|中午|下午|晚上)?\s*(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(?:点|时|:|：)/;
 
 function hasExecutionIntent(text:string) {
   return (
@@ -73,7 +73,7 @@ function chineseNumber(raw:string):number|null {
 }
 
 function clock(text:string) {
-  const match=text.match(/(凌晨|早上|上午|中午|下午|晚上)?\s*(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})(?:点|时|:|：)\s*(?:(半|一刻|三刻)|(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})分?)?/);
+  const match=text.match(/(凌晨|早上|上午|中午|下午|晚上)?\s*(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(?:点|时|:|：)\s*(?:(半|一刻|三刻)|(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分?)?/);
   if(!match)return null;
   const period=match[1]||"";
   let hour=chineseNumber(match[2]!);
@@ -91,10 +91,11 @@ function shanghaiDate(now:Date){const p=new Intl.DateTimeFormat("en-CA",{timeZon
 function oneTimeAt(dayOffset:number,time:{hour:number;minute:number},now:Date){const d=shanghaiDate(now);const utc=Date.UTC(d.year,d.month-1,d.day+dayOffset,time.hour-8,time.minute);return new Date(utc).toISOString();}
 function weekdays(text:string){const map:Record<string,number>={一:1,二:2,三:3,四:4,五:5,六:6,日:0,天:0};const m=text.match(/每周([一二三四五六日天、，,]+)/);if(!m)return null;const values=[...m[1]!].map(x=>map[x]).filter((x):x is number=>x!==undefined);return values.length?[...new Set(values)].join(","):null;}
 function taskName(text:string){
-  const action=text.match(/(?:提醒我|通知我|叫我|喊我|给我(?:发送|发|推送|播报)?|发给我|向我(?:发送|推送|播报)|发送|推送|播报|告诉我)\s*([^，。！？!?]+)\s*$/)?.[1];
+  const action=text.match(/(?:提醒我|通知我|叫我|喊我|给(?:我|你)(?:发送|发|推送|播报|返回)?|发给我|向我(?:发送|推送|播报)|发送|推送|播报|告诉我)\s*([^，。！？!?]+)\s*$/)?.[1];
   const clean=(action||text)
     .replace(/^(?:一下|一声|每天|每日)\s*/,"")
-    .replace(/(?:凌晨|早上|上午|中午|下午|晚上)?\s*(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})(?:点|时|:|：)\s*(?:(?:半|一刻|三刻)|(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})分?)?/g,"")
+    .replace(/(?:创建|新建|新增|设置|添加)(?:一个)?定时任务/g,"")
+    .replace(/(?:凌晨|早上|上午|中午|下午|晚上)?\s*(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(?:点|时|:|：)\s*(?:(?:半|一刻|三刻)|(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分?)?/g,"")
     .replace(/[，,。！!？?]/g," ")
     .trim();
   return (clean||"定时任务").slice(0,40);

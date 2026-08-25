@@ -13,7 +13,10 @@ FROM docker.1panel.live/library/node:22-bookworm-slim
 # China-friendly defaults keep production rebuilds independent of overseas
 # registries. Both remain overridable for non-China build environments.
 ARG NPM_REGISTRY=https://registry.npmmirror.com
-ARG DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
+# The slim base does not yet contain system CA certificates. Use Aliyun's
+# signed HTTP Debian repository to bootstrap ca-certificates without a TLS
+# dependency cycle; apt still verifies repository metadata via Debian GPG.
+ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 
 LABEL org.opencontainers.image.title="wechat-ai" \
       org.opencontainers.image.description="WeChat roleplay bots via iLink, Redis, LINUX DO OAuth"

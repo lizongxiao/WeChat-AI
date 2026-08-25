@@ -37,7 +37,9 @@ docker compose logs -f wechat-ai
 ```
 
 仓库内的 Dockerfile 默认使用国内镜像：`docker.1panel.live` 基础镜像、
-`registry.npmmirror.com` npm 源、阿里云 Debian/PyPI 源。日常部署无需再传
+`registry.npmmirror.com` npm 源、阿里云 Debian/PyPI 源。Debian 引导源使用
+HTTP 以便在极简基础镜像尚无 CA 证书时先安装 `ca-certificates`；APT 仍会通过
+Debian GPG 签名验证仓库元数据。日常部署无需再传
 镜像源参数；如在其他网络环境构建，可用 `NPM_REGISTRY`、`DEBIAN_MIRROR`
 或 `PIP_INDEX_URL` build arg 覆盖。
 

@@ -21,23 +21,20 @@ ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 LABEL org.opencontainers.image.title="wechat-ai" \
       org.opencontainers.image.description="WeChat roleplay bots via iLink, Redis, LINUX DO OAuth"
 
-# Keep corepack/pnpm under /pnpm so the non-root runtime user can use them
+# Keep pnpm's writable home under /pnpm so the non-root runtime user can use it
 # without writing to /home/appuser/.cache (which caused EACCES).
 ENV PNPM_HOME=/pnpm \
-    COREPACK_HOME=/pnpm/corepack \
     PATH=/pnpm:$PATH \
     NODE_ENV=production \
     WECHAT_AI_HOST=0.0.0.0 \
     WECHAT_AI_PORT=8787 \
-    COREPACK_NPM_REGISTRY=$NPM_REGISTRY \
-    npm_config_registry=$NPM_REGISTRY \
-    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+    npm_config_registry=$NPM_REGISTRY
 
-RUN corepack enable \
-  && corepack prepare pnpm@11.15.0 --activate \
-  && sed -i "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g; s|http://deb.debian.org/debian-security|${DEBIAN_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources \
+RUN sed -i "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g; s|http://deb.debian.org/debian-security|${DEBIAN_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources \
   && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
+  && npm install --global pnpm@11.15.0 --registry="${NPM_REGISTRY}" \
+  && pnpm --version \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

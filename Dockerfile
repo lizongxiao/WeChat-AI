@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # WeChat-AI (iLink + Redis + LINUX DO OAuth)
 #
 # Prefer host wrappers (bump + OTA pack + docker):
@@ -9,11 +8,12 @@
 #
 # 必填环境变量见 .env.example / docs/docker.md
 
-FROM node:22-bookworm-slim
+FROM docker.1panel.live/library/node:22-bookworm-slim
 
-# Override when the default npm registry is unreachable from the build host,
-# e.g. `docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com`.
-ARG NPM_REGISTRY=https://registry.npmjs.org
+# China-friendly defaults keep production rebuilds independent of overseas
+# registries. Both remain overridable for non-China build environments.
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
 
 LABEL org.opencontainers.image.title="wechat-ai" \
       org.opencontainers.image.description="WeChat roleplay bots via iLink, Redis, LINUX DO OAuth"
@@ -32,6 +32,7 @@ ENV PNPM_HOME=/pnpm \
 
 RUN corepack enable \
   && corepack prepare pnpm@11.15.0 --activate \
+  && sed -i "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g; s|http://deb.debian.org/debian-security|${DEBIAN_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources \
   && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*

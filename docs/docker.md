@@ -36,6 +36,11 @@ pnpm docker:build -- -- docker build -t your-dockerhub-user/wechat-ai:latest .
 docker compose logs -f wechat-ai
 ```
 
+仓库内的 Dockerfile 默认使用国内镜像：`docker.1panel.live` 基础镜像、
+`registry.npmmirror.com` npm 源、阿里云 Debian/PyPI 源。日常部署无需再传
+镜像源参数；如在其他网络环境构建，可用 `NPM_REGISTRY`、`DEBIAN_MIRROR`
+或 `PIP_INDEX_URL` build arg 覆盖。
+
 ### 单独构建 tools 镜像
 
 ```bash

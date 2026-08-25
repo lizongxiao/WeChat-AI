@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # wechat-ai-tools — Hugging Face Spaces / self-hosted Docker image
 #
 # Build:
@@ -11,7 +10,9 @@
 #
 # HF Spaces: set SDK to Docker; Space will use this Dockerfile.
 
-FROM python:3.12-slim-bookworm
+FROM docker.1panel.live/library/python:3.12-slim-bookworm
+
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 
 LABEL org.opencontainers.image.title="wechat-ai-tools" \
       org.opencontainers.image.description="WeChat-AI tools gateway: web search + user custom LLM proxy" \
@@ -21,6 +22,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=$PIP_INDEX_URL \
     HOST=0.0.0.0 \
     PORT=7860
 

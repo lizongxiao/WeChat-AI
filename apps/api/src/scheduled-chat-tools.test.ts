@@ -14,6 +14,7 @@ import {
 } from "@wechat-ai/db";
 import {
   handleScheduledChatTool,
+  isScheduledCancelIntent,
   isScheduledOverviewIntent,
   parseScheduledTask,
   scheduledChatTools,
@@ -66,6 +67,25 @@ describe("scheduled chat tool contract", () => {
     assert.deepEqual(parseScheduledTask("晚上8点提醒我吃药"), {
       question: "你希望今天、明天，还是每天 20:00 提醒？",
     });
+  });
+
+  it("uses an explicit appointment date for a one-time reminder", () => {
+    const appointment = parseScheduledTask(
+      "已预约2026年09月01日16:00口腔牙周科门诊，当天上午8点提醒我",
+      new Date("2026-08-25T14:10:00Z"),
+    );
+    assert.ok(appointment && !("question" in appointment));
+    if (!appointment || "question" in appointment) return;
+    assert.equal(appointment.schedule_type, "one_time");
+    assert.equal(appointment.execute_at, "2026-09-01T00:00:00.000Z");
+    assert.equal(appointment.display, "2026年09月01日 08:00");
+  });
+
+  it("recognizes natural ways to abandon a pending reminder", () => {
+    for (const text of ["这个需要去掉提醒了", "关闭", "不是", "取消"]) {
+      assert.equal(isScheduledCancelIntent(text), true, text);
+    }
+    assert.equal(isScheduledCancelIntent("不是每天，是明天"), false);
   });
 
   it("recognizes natural questions about the current persona's schedules", () => {
@@ -128,12 +148,28 @@ describe("scheduled chat tool contract", () => {
 
     const ask = (text:string) =>
       handleScheduledChatTool(db!, { botId, peerId, text });
+    assert.equal(await ask("已预约2026年09月01日16:00口腔牙周科门诊"), null);
+    const appointmentPlan = await ask("当天上午8点提醒我");
+    assert.match(appointmentPlan ?? "", /准备创建定时任务/);
+    assert.match(appointmentPlan ?? "", /2026年09月01日 08:00/);
+    assert.match((await ask("取消")) ?? "", /已取消/);
     const prepared = await ask("帮我设置每天早上八点半叫我起床");
     assert.match(prepared ?? "", /准备创建定时任务/);
     assert.match((await ask("好的，创建吧")) ?? "", /已创建/);
     assert.match((await ask("每天提醒我喝水")) ?? "", /几点/);
     assert.match((await ask("上午九点")) ?? "", /准备创建定时任务/);
     assert.match((await ask("确认")) ?? "", /已创建/);
+
+    // A user can abandon a clarification in ordinary language. The pending
+    // draft must be cleared instead of trapping every later message in the
+    // same "today/tomorrow/daily" question.
+    assert.match((await ask("晚上8点提醒我吃药")) ?? "", /今天、明天/);
+    assert.match((await ask("这个需要去掉提醒了")) ?? "", /已取消/);
+    assert.equal(await ask("不是"), null);
+
+    assert.match((await ask("晚上8点提醒我吃药")) ?? "", /今天、明天/);
+    assert.match((await ask("关闭")) ?? "", /已取消/);
+    assert.equal(await ask("不是"), null);
     // Regression for the conversational completion shown in production: a
     // spaced clock must advance the pending draft instead of asking again.
     assert.match((await ask("每天开盘前给你返回黄金实时价格，创建定时任务")) ?? "", /几点/);

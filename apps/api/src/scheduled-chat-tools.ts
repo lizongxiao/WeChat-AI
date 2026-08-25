@@ -42,7 +42,8 @@ export const scheduledChatTools = [
 
 type ParsedPlan = { name:string; prompt:string; schedule:string; schedule_type:"cron"|"one_time"; execute_at?:string; timezone:"Asia/Shanghai"; web_search_enabled:number; display:string };
 const YES=/^\s*(?:确认(?:创建|订阅|取消)?|可以(?:创建|订阅)?|创建吧?|确定|好(?:的)?(?:[，,]\s*)?(?:确认|创建|订阅|取消)?吧?|嗯+(?:[，,]\s*)?(?:确认|可以|创建|订阅)(?:吧)?)\s*[！!。.]?\s*$/;
-const NO=/^\s*(?:取消|不用了|算了|不要(?:了)?|先不(?:创建|订阅|弄)(?:了)?)\s*[！!。.]?\s*$/;
+const NO=/^\s*(?:不是|关闭|取消|不用了|算了|不要(?:了)?|先不(?:创建|订阅|弄)(?:了)?|(?:这个)?(?:需要)?(?:去掉|取消|关闭)(?:这个)?提醒(?:了)?)\s*[！!。.]?\s*$/;
+export function isScheduledCancelIntent(text:string){return NO.test(text);}
 const SCHEDULE_SIGNAL =
   /(?:每天|每日|工作日|每周[一二三四五六日天、，,\s]*|今天|明天)/;
 const ACTION_SIGNAL =
@@ -73,7 +74,10 @@ function chineseNumber(raw:string):number|null {
 }
 
 function clock(text:string) {
-  const match=text.match(/(凌晨|早上|上午|中午|下午|晚上)?\s*(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(?:点|时|:|：)\s*(?:(半|一刻|三刻)|(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分?)?/);
+  // Appointment messages often contain both the visit time and a later
+  // reminder request. The reminder clock is conventionally the final clock.
+  const matches=[...text.matchAll(/(凌晨|早上|上午|中午|下午|晚上)?\s*(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(?:点|时|:|：)\s*(?:(半|一刻|三刻)|(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分?)?/g)];
+  const match=matches.at(-1);
   if(!match)return null;
   const period=match[1]||"";
   let hour=chineseNumber(match[2]!);
@@ -89,6 +93,16 @@ function clock(text:string) {
 }
 function shanghaiDate(now:Date){const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(now);const n=(type:string)=>Number(p.find(x=>x.type===type)?.value);return {year:n("year"),month:n("month"),day:n("day")};}
 function oneTimeAt(dayOffset:number,time:{hour:number;minute:number},now:Date){const d=shanghaiDate(now);const utc=Date.UTC(d.year,d.month-1,d.day+dayOffset,time.hour-8,time.minute);return new Date(utc).toISOString();}
+function explicitDate(text:string){
+  const match=text.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?/);
+  if(!match)return null;
+  const year=Number(match[1]); const month=Number(match[2]); const day=Number(match[3]);
+  const probe=new Date(Date.UTC(year,month-1,day));
+  if(probe.getUTCFullYear()!==year||probe.getUTCMonth()!==month-1||probe.getUTCDate()!==day)return null;
+  return {year,month,day};
+}
+function oneTimeOn(date:{year:number;month:number;day:number},time:{hour:number;minute:number}){return new Date(Date.UTC(date.year,date.month-1,date.day,time.hour-8,time.minute)).toISOString();}
+function isAppointmentContext(text:string){return explicitDate(text)!==null&&clock(text)!==null&&/(?:预约|门诊|就诊|取号|科室|医生)/.test(text);}
 function weekdays(text:string){const map:Record<string,number>={一:1,二:2,三:3,四:4,五:5,六:6,日:0,天:0};const m=text.match(/每周([一二三四五六日天、，,]+)/);if(!m)return null;const values=[...m[1]!].map(x=>map[x]).filter((x):x is number=>x!==undefined);return values.length?[...new Set(values)].join(","):null;}
 function taskName(text:string){
   const action=text.match(/(?:提醒我|通知我|叫我|喊我|给(?:我|你)(?:发送|发|推送|播报|返回)?|发给我|向我(?:发送|推送|播报)|发送|推送|播报|告诉我)\s*([^，。！？!?]+)\s*$/)?.[1];
@@ -105,6 +119,8 @@ export function parseScheduledTask(text:string, now=new Date()): ParsedPlan | { 
   const time=clock(text); if(!time)return {question:"几点提醒你？"};
   const prompt=text.trim(); const web=/(?:联网|实时|最新|天气|新闻|资讯|搜索|查询|查一下)/.test(text)?1:0;
   const days=weekdays(text);
+  const date=explicitDate(text);
+  if(date){const execute_at=oneTimeOn(date,time);const display=`${date.year}年${String(date.month).padStart(2,"0")}月${String(date.day).padStart(2,"0")}日 ${time.label}`;return {name:taskName(text),prompt,schedule:"",schedule_type:"one_time",execute_at,timezone:"Asia/Shanghai",web_search_enabled:web,display};}
   if(/明天/.test(text)||/今天/.test(text)) { const offset=/明天/.test(text)?1:0; const execute_at=oneTimeAt(offset,time,now); return {name:taskName(text),prompt,schedule:"",schedule_type:"one_time",execute_at,timezone:"Asia/Shanghai",web_search_enabled:web,display:`${/明天/.test(text)?"明天":"今天"} ${time.label}`}; }
   if(!/(?:每天|每日|工作日|每周)/.test(text))return {question:`你希望今天、明天，还是每天 ${time.label} 提醒？`};
   const dow=days ?? (/工作日/.test(text)?"1-5":"*");
@@ -221,8 +237,11 @@ function pendingTaskConfirmation(parsed:ParsedPlan,personaName:string){
 export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:string;text:string}) : Promise<string|null> {  const text=input.text.trim();
   const pending=await getPendingScheduledPlan(db,input.botId,input.peerId);
   if(pending){
-    if(NO.test(text))return cancel_scheduled_task(db,{...input});
+    if(isScheduledCancelIntent(text))return cancel_scheduled_task(db,{...input});
     if(pending.kind==="task"&&pending.payload.collecting==="schedule"){
+      if(pending.payload.contextual===true&&!hasExecutionIntent(text)){
+        await clearPendingScheduledPlan(db,input.botId,input.peerId);
+      }else{
       if(YES.test(text))return "还需要先补充执行日期或时间。";
       const draft=`${String(pending.payload.draft_text||"")} ${text}`.trim();
       const parsed=parseScheduledTask(draft);
@@ -233,6 +252,7 @@ export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:s
       await savePendingScheduledPlan(db,{...pending,payload:parsed,created_at:new Date().toISOString()});
       const persona=await resolvePersonaForPeer(db,input.botId,input.peerId);
       return pendingTaskConfirmation(parsed,persona?.display_name||"当前人设");
+      }
     }
     if(pending.kind==="subscription"&&typeof pending.payload.collecting==="string"){
       const service=await getSystemSubscriptionService(db,String(pending.payload.service_id));
@@ -284,6 +304,10 @@ export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:s
   const target=tasks.find(t=>text.includes(t.name));
   if(target&&/(取消|删除)/.test(text))return cancel_scheduled_task(db,{...input,taskId:target.id});
   if(target&&/(暂停|恢复|启用|改成|改为)/.test(text)){const parsed=parseScheduledTask(`${text} 提醒我`);const patch=parsed&&!("question" in parsed)?{schedule:parsed.schedule,schedule_type:parsed.schedule_type,execute_at:parsed.execute_at||null,timezone:parsed.timezone}:{enabled:/暂停/.test(text)?0:1};return update_scheduled_task(db,{...input,taskId:target.id,patch,summary:/暂停/.test(text)?"暂停":/恢复|启用/.test(text)?"恢复启用":"修改执行时间"});}
+  if(isAppointmentContext(text)&&persona){
+    await savePendingScheduledPlan(db,{kind:"task",user_id:await actor(db,input.botId,input.peerId),bot_id:input.botId,peer_id:input.peerId,persona_id:persona.id,payload:{draft_text:text,collecting:"schedule",contextual:true},created_at:new Date().toISOString()});
+    return null;
+  }
   return prepare_scheduled_task(db,input);
 }
 

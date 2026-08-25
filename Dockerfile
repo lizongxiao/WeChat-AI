@@ -11,6 +11,10 @@
 
 FROM node:22-bookworm-slim
 
+# Override when the default npm registry is unreachable from the build host,
+# e.g. `docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com`.
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
 LABEL org.opencontainers.image.title="wechat-ai" \
       org.opencontainers.image.description="WeChat roleplay bots via iLink, Redis, LINUX DO OAuth"
 
@@ -22,6 +26,8 @@ ENV PNPM_HOME=/pnpm \
     NODE_ENV=production \
     WECHAT_AI_HOST=0.0.0.0 \
     WECHAT_AI_PORT=8787 \
+    COREPACK_NPM_REGISTRY=$NPM_REGISTRY \
+    npm_config_registry=$NPM_REGISTRY \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 RUN corepack enable \

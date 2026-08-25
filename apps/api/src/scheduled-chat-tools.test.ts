@@ -17,8 +17,11 @@ import {
   isScheduledCancelIntent,
   isScheduledOverviewIntent,
   parseScheduledTask,
+  parseAppointmentReminder,
+  resolveScheduledTaskReference,
   scheduledChatTools,
 } from "./scheduled-chat-tools.js";
+import type { ScheduledTask } from "@wechat-ai/db";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 
@@ -81,11 +84,44 @@ describe("scheduled chat tool contract", () => {
     assert.equal(appointment.display, "2026年09月01日 08:00");
   });
 
+  it("derives reminder times relative to an appointment", () => {
+    const message="【深圳市第三人民医院】已预约2026年09月01日16:00-16:30口腔牙周科门诊，请提前30分钟取号";
+    const oneDay=parseAppointmentReminder(message,"提前一天提醒我");
+    assert.ok(oneDay);
+    assert.equal(oneDay?.execute_at,"2026-08-31T08:00:00.000Z");
+    assert.equal(oneDay?.display,"2026年08月31日 16:00（提前1天）");
+    const oneHour=parseAppointmentReminder(message,"提前一个小时提醒");
+    assert.equal(oneHour?.execute_at,"2026-09-01T07:00:00.000Z");
+    const custom=parseAppointmentReminder(message,"提前90分钟");
+    assert.equal(custom?.execute_at,"2026-09-01T06:30:00.000Z");
+    assert.equal(parseAppointmentReminder(message,"前一天上午8点")?.execute_at,"2026-08-31T00:00:00.000Z");
+    assert.equal(parseAppointmentReminder(message,"8月31日上午9点")?.execute_at,"2026-08-31T01:00:00.000Z");
+    assert.equal(parseAppointmentReminder(message,"9月2日上午9点"),null);
+  });
+
   it("recognizes natural ways to abandon a pending reminder", () => {
     for (const text of ["这个需要去掉提醒了", "关闭", "不是", "取消"]) {
       assert.equal(isScheduledCancelIntent(text), true, text);
     }
     assert.equal(isScheduledCancelIntent("不是每天，是明天"), false);
+  });
+
+  it("resolves conversational and quoted references to scheduled tasks", () => {
+    const task = (id:string,name:string,prompt:string,created_at:string):ScheduledTask => ({
+      id,user_id:"user",bot_id:"bot",peer_id:"peer",persona_id:"persona",name,prompt,
+      schedule:"0 8 * * *",timezone:"Asia/Shanghai",web_search_enabled:0,enabled:1,
+      created_via:"chat",created_at,updated_at:created_at,
+    });
+    const tasks=[
+      task("a","喝水","每天早上8点提醒我喝水","2026-08-01T00:00:00Z"),
+      task("b","黄金实时价格","每天开盘前返回黄金实时价格","2026-08-02T00:00:00Z"),
+    ];
+    assert.equal(resolveScheduledTaskReference(tasks,"关闭黄金实时价格提醒").task?.id,"b");
+    assert.equal(resolveScheduledTaskReference(tasks,"引用：每天开盘前返回黄金实时价格\n取消这个任务").task?.id,"b");
+    assert.equal(resolveScheduledTaskReference(tasks,"取消第二个定时任务").task?.id,"b");
+    assert.equal(resolveScheduledTaskReference(tasks,"把提醒关掉").task,null);
+    assert.equal(resolveScheduledTaskReference([tasks[0]!],"把这个提醒关掉").task?.id,"a");
+    assert.equal(resolveScheduledTaskReference([tasks[0]!],"不要了").task,null);
   });
 
   it("recognizes natural questions about the current persona's schedules", () => {
@@ -148,7 +184,7 @@ describe("scheduled chat tool contract", () => {
 
     const ask = (text:string) =>
       handleScheduledChatTool(db!, { botId, peerId, text });
-    assert.equal(await ask("已预约2026年09月01日16:00口腔牙周科门诊"), null);
+    assert.match((await ask("已预约2026年09月01日16:00口腔牙周科门诊")) ?? "", /识别到预约.*提前一天.*提前一小时/s);
     const appointmentPlan = await ask("当天上午8点提醒我");
     assert.match(appointmentPlan ?? "", /准备创建定时任务/);
     assert.match(appointmentPlan ?? "", /2026年09月01日 08:00/);
@@ -183,6 +219,13 @@ describe("scheduled chat tool contract", () => {
     assert.ok(tasks.some(task=>task.schedule==="0 9 * * *"));
     assert.ok(tasks.some(task=>task.schedule==="0 8 * * *"));
 
+    assert.match((await ask("关闭定时任务")) ?? "", /你想关闭哪一个/);
+    assert.match((await ask("关闭黄金实时价格提醒")) ?? "", /准备删除/);
+    assert.match((await ask("不是")) ?? "", /已取消待确认/);
+    assert.match((await ask("引用：每天开盘前给你返回黄金实时价格，创建定时任务\n取消这个任务")) ?? "", /准备删除/);
+    assert.match((await ask("确认取消")) ?? "", /已删除/);
+    assert.equal((await listPeerScheduledTasks(db,botId,peerId)).some(task=>task.name.includes("黄金实时价格")),false);
+
     const beforeSubscription = await ask("这个人设有哪些定时任务");
     assert.match(beforeSubscription ?? "", /晨间天气/);
     assert.match(beforeSubscription ?? "", /\[自建任务\].*起床/);
@@ -193,7 +236,6 @@ describe("scheduled chat tool contract", () => {
     assert.match((await ask("嗯，确认")) ?? "", /已订阅/);
     const overview = await ask("我现在订阅了什么");
     assert.match(overview ?? "", /\[系统订阅\].*晨间天气.*上海/);
-    assert.ok(tasks.some(task=>task.name.includes("黄金实时价格")));
 
     await deleteSystemSubscriptionService(db, service.id);
     await db.close();

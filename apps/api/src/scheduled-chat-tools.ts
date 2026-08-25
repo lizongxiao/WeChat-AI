@@ -42,7 +42,7 @@ export const scheduledChatTools = [
 
 type ParsedPlan = { name:string; prompt:string; schedule:string; schedule_type:"cron"|"one_time"; execute_at?:string; timezone:"Asia/Shanghai"; web_search_enabled:number; display:string };
 const YES=/^\s*(?:确认(?:创建|订阅|取消)?|可以(?:创建|订阅)?|创建吧?|确定|好(?:的)?(?:[，,]\s*)?(?:确认|创建|订阅|取消)?吧?|嗯+(?:[，,]\s*)?(?:确认|可以|创建|订阅)(?:吧)?)\s*[！!。.]?\s*$/;
-const NO=/^\s*(?:不是|关闭|取消|不用了|算了|不要(?:了)?|先不(?:创建|订阅|弄)(?:了)?|(?:这个)?(?:需要)?(?:去掉|取消|关闭)(?:这个)?提醒(?:了)?)\s*[！!。.]?\s*$/;
+const NO=/^\s*(?:不是|关闭|取消|不用了|算了|不要(?:了)?|不需要(?:提醒)?|暂不(?:需要)?(?:提醒)?|先不(?:创建|订阅|弄)(?:了)?|(?:这个)?(?:需要)?(?:去掉|取消|关闭)(?:这个)?提醒(?:了)?)\s*[！!。.]?\s*$/;
 export function isScheduledCancelIntent(text:string){return NO.test(text);}
 const SCHEDULE_SIGNAL =
   /(?:每天|每日|工作日|每周[一二三四五六日天、，,\s]*|今天|明天)/;
@@ -73,11 +73,11 @@ function chineseNumber(raw:string):number|null {
   return raw.length===1 ? map[raw] ?? null : null;
 }
 
-function clock(text:string) {
+function clock(text:string,preference:"first"|"last"="last") {
   // Appointment messages often contain both the visit time and a later
   // reminder request. The reminder clock is conventionally the final clock.
   const matches=[...text.matchAll(/(凌晨|早上|上午|中午|下午|晚上)?\s*(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*(?:点|时|:|：)\s*(?:(半|一刻|三刻)|(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分?)?/g)];
-  const match=matches.at(-1);
+  const match=preference==="first"?matches[0]:matches.at(-1);
   if(!match)return null;
   const period=match[1]||"";
   let hour=chineseNumber(match[2]!);
@@ -103,6 +103,28 @@ function explicitDate(text:string){
 }
 function oneTimeOn(date:{year:number;month:number;day:number},time:{hour:number;minute:number}){return new Date(Date.UTC(date.year,date.month-1,date.day,time.hour-8,time.minute)).toISOString();}
 function isAppointmentContext(text:string){return explicitDate(text)!==null&&clock(text)!==null&&/(?:预约|门诊|就诊|取号|科室|医生)/.test(text);}
+function appointmentDetails(text:string){const date=explicitDate(text);const time=clock(text,"first");if(!date||!time||!isAppointmentContext(text))return null;return {date,time,at:oneTimeOn(date,time)};}
+function appointmentDisplay(iso:string,suffix:string){const parts=new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).formatToParts(new Date(iso));const get=(type:string)=>parts.find(x=>x.type===type)?.value||"";return `${get("year")}年${get("month")}月${get("day")}日 ${get("hour")}:${get("minute")}（${suffix}）`;}
+export function parseAppointmentReminder(appointmentText:string,answer:string):ParsedPlan|null {
+  const appointment=appointmentDetails(appointmentText);if(!appointment)return null;
+  const match=answer.match(/提前\s*(半|\d+|[零〇一二两三四五六七八九十]+)\s*(天|日|个?小时|钟头|分钟)/);
+  let execute_at:string;let suffix:string;
+  if(match){
+    const amount=match[1]==="半"?0.5:chineseNumber(match[1]!);if(amount===null||amount<=0)return null;
+    const unit=match[2]!;const milliseconds=/天|日/.test(unit)?amount*86_400_000:/小时|钟头/.test(unit)?amount*3_600_000:amount*60_000;
+    execute_at=new Date(Date.parse(appointment.at)-milliseconds).toISOString();
+    suffix=/天|日/.test(unit)?`提前${amount}天`:/小时|钟头/.test(unit)?`提前${amount===0.5?"半":amount}小时`:`提前${amount}分钟`;
+  }else{
+    const customTime=clock(answer);if(!customTime)return null;
+    const full=explicitDate(answer);const monthDay=answer.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?/);
+    let customDate=full|| (monthDay?{year:appointment.date.year,month:Number(monthDay[1]),day:Number(monthDay[2])}:null);
+    if(!customDate&&/(?:前一天|前1天|提前一天)/.test(answer)){const previous=new Date(Date.UTC(appointment.date.year,appointment.date.month-1,appointment.date.day-1));customDate={year:previous.getUTCFullYear(),month:previous.getUTCMonth()+1,day:previous.getUTCDate()};}
+    if(!customDate)return null;
+    execute_at=oneTimeOn(customDate,customTime);if(Date.parse(execute_at)>=Date.parse(appointment.at))return null;
+    suffix="自定义提醒";
+  }
+  return {name:taskName(`${appointmentText} 提醒我就诊`),prompt:`就诊提醒：${appointmentText.trim()}`,schedule:"",schedule_type:"one_time",execute_at,timezone:"Asia/Shanghai",web_search_enabled:0,display:appointmentDisplay(execute_at,suffix)};
+}
 function weekdays(text:string){const map:Record<string,number>={一:1,二:2,三:3,四:4,五:5,六:6,日:0,天:0};const m=text.match(/每周([一二三四五六日天、，,]+)/);if(!m)return null;const values=[...m[1]!].map(x=>map[x]).filter((x):x is number=>x!==undefined);return values.length?[...new Set(values)].join(","):null;}
 function taskName(text:string){
   const action=text.match(/(?:提醒我|通知我|叫我|喊我|给(?:我|你)(?:发送|发|推送|播报|返回)?|发给我|向我(?:发送|推送|播报)|发送|推送|播报|告诉我)\s*([^，。！？!?]+)\s*$/)?.[1];
@@ -142,6 +164,28 @@ function formatTask(task:ScheduledTask){
     : formatCron(task.schedule);
   return `${task.name}｜${when}｜${task.enabled?"已启用":"已暂停"}`;
 }
+function orderedTasks(tasks:ScheduledTask[]){return [...tasks].sort((a,b)=>(Date.parse(a.created_at)||0)-(Date.parse(b.created_at)||0)||a.id.localeCompare(b.id));}
+const CANCELLATION_VERB=/(?:取消|删除|移除|关闭|停止|停掉|关掉|不要了|不再)/;
+function cancellationIntent(text:string){return CANCELLATION_VERB.test(text)&&/(?:定时任务|任务|提醒|推送|订阅|第\s*(?:\d+|[一二两三四五六七八九十]+)\s*(?:个|条|项)?|这个|那个|它)/.test(text);}
+function chineseOrdinal(raw:string){const value=chineseNumber(raw);return value&&value>0?value:null;}
+export function resolveScheduledTaskReference(tasks:ScheduledTask[],text:string):{task:ScheduledTask|null;candidates:ScheduledTask[]} {
+  const ordered=orderedTasks(tasks);
+  const ordinal=text.match(/第\s*(\d+|[一二两三四五六七八九十]+)\s*(?:个|条|项)?/);
+  if(ordinal){const index=chineseOrdinal(ordinal[1]!);const task=index?ordered[index-1]||null:null;return {task,candidates:task?[task]:ordered};}
+  const normalized=text.replace(/[\s，,。！!？?：:“”'"《》【】\[\]()（）]/g,"");
+  const exact=ordered.filter(task=>normalized.includes(task.name.replace(/\s/g,"")));
+  if(exact.length===1)return {task:exact[0]!,candidates:exact};
+  if(exact.length>1)return {task:null,candidates:exact};
+  const promptMatches=ordered.filter(task=>{
+    const prompt=task.prompt.replace(/[\s，,。！!？?：:“”'"《》【】\[\]()（）]/g,"");
+    const snippets=[...prompt.matchAll(/[\u3400-\u9fffA-Za-z0-9]{4,}/g)].map(match=>match[0]!);
+    return snippets.some(snippet=>normalized.includes(snippet)||snippet.includes(normalized));
+  });
+  if(promptMatches.length===1)return {task:promptMatches[0]!,candidates:promptMatches};
+  if(ordered.length===1&&cancellationIntent(text))return {task:ordered[0]!,candidates:ordered};
+  return {task:null,candidates:promptMatches.length?promptMatches:ordered};
+}
+function cancellationCandidates(tasks:ScheduledTask[]){return orderedTasks(tasks).map((task,index)=>`${index+1}. ${formatTask(task)}`).join("\n");}
 function formatSubscription(service:SystemSubscriptionService|undefined,params:Record<string,unknown>,enabled:number){
   const values=Object.values(params).filter(x=>typeof x==="string"||typeof x==="number").join("、");
   return `${service?.name||"已下线服务"}${values?`（${values}）`:""}｜${service?formatCron(service.schedule):"计划未知"}｜${enabled?"已启用":"已暂停"}`;
@@ -170,7 +214,7 @@ export async function list_current_persona_schedules(db:Db,input:{botId:string;p
     listPeerSubscriptions(db,input.botId,input.peerId),
     listSystemSubscriptionServices(db),
   ]);
-  const tasks=allTasks.filter(x=>x.persona_id===persona.id);
+  const tasks=orderedTasks(allTasks.filter(x=>x.persona_id===persona.id));
   const subscriptions=allSubscriptions.filter(x=>x.persona_id===persona.id);
   const serviceMap=new Map(services.map(x=>[x.id,x]));
   const openChecks=await Promise.all(services.map(x=>isServiceOpenToPersona(db,x.id,persona.id)));
@@ -238,6 +282,17 @@ export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:s
   const pending=await getPendingScheduledPlan(db,input.botId,input.peerId);
   if(pending){
     if(isScheduledCancelIntent(text))return cancel_scheduled_task(db,{...input});
+    if(pending.kind==="task"&&pending.payload.collecting==="appointment_reminder"){
+      const appointmentText=String(pending.payload.draft_text||"");
+      if(/^(?:自定义|其他|别的)(?:时间)?$/.test(text))return "你希望提前多久提醒？例如“提前 2 小时”或“提前 3 天”。也可以说“当天上午 8 点”。";
+      const relative=parseAppointmentReminder(appointmentText,text);
+      const absolute=relative?null:parseScheduledTask(`${appointmentText} ${text}`);
+      const parsed=relative||(absolute&&!("question" in absolute)?absolute:null);
+      if(!parsed)return "请选择“提前一天”“提前一小时”，或告诉我自定义时间，例如“提前 90 分钟”“当天上午 8 点”。不需要可回复“取消”。";
+      await savePendingScheduledPlan(db,{...pending,payload:parsed,created_at:new Date().toISOString()});
+      const persona=await resolvePersonaForPeer(db,input.botId,input.peerId);
+      return pendingTaskConfirmation(parsed,persona?.display_name||"当前人设");
+    }
     if(pending.kind==="task"&&pending.payload.collecting==="schedule"){
       if(pending.payload.contextual===true&&!hasExecutionIntent(text)){
         await clearPendingScheduledPlan(db,input.botId,input.peerId);
@@ -301,12 +356,19 @@ export async function handleScheduledChatTool(db:Db,input:{botId:string;peerId:s
     return required?`你想订阅的 ${required} 是什么？`:`准备订阅：\n${service.name}\n${formatCron(service.schedule)}（${service.timezone}）\n确认订阅吗？`;
   }
   const tasks=(await listPeerScheduledTasks(db,input.botId,input.peerId)).filter(t=>!persona||t.persona_id===persona.id);
-  const target=tasks.find(t=>text.includes(t.name));
-  if(target&&/(取消|删除)/.test(text))return cancel_scheduled_task(db,{...input,taskId:target.id});
+  const referenced=resolveScheduledTaskReference(tasks,text);
+  const target=referenced.task;
+  if(cancellationIntent(text)||(target!==null&&CANCELLATION_VERB.test(text))){
+    if(target)return cancel_scheduled_task(db,{...input,taskId:target.id});
+    if(!tasks.length)return "当前人设没有可取消的自建定时任务。";
+    return `你想关闭哪一个定时任务？\n${cancellationCandidates(referenced.candidates)}`;
+  }
   if(target&&/(暂停|恢复|启用|改成|改为)/.test(text)){const parsed=parseScheduledTask(`${text} 提醒我`);const patch=parsed&&!("question" in parsed)?{schedule:parsed.schedule,schedule_type:parsed.schedule_type,execute_at:parsed.execute_at||null,timezone:parsed.timezone}:{enabled:/暂停/.test(text)?0:1};return update_scheduled_task(db,{...input,taskId:target.id,patch,summary:/暂停/.test(text)?"暂停":/恢复|启用/.test(text)?"恢复启用":"修改执行时间"});}
   if(isAppointmentContext(text)&&persona){
-    await savePendingScheduledPlan(db,{kind:"task",user_id:await actor(db,input.botId,input.peerId),bot_id:input.botId,peer_id:input.peerId,persona_id:persona.id,payload:{draft_text:text,collecting:"schedule",contextual:true},created_at:new Date().toISOString()});
-    return null;
+    const appointment=appointmentDetails(text)!;
+    await savePendingScheduledPlan(db,{kind:"task",user_id:await actor(db,input.botId,input.peerId),bot_id:input.botId,peer_id:input.peerId,persona_id:persona.id,payload:{draft_text:text,collecting:"appointment_reminder",contextual:true},created_at:new Date().toISOString()});
+    const visit=appointmentDisplay(appointment.at,"预约时间").replace("（预约时间）","");
+    return `识别到预约：${visit}。\n你希望何时提醒？可以回复“提前一天”“提前一小时”“当天上午 8 点”或自定义“提前 90 分钟”。不需要提醒可回复“取消”。`;
   }
   return prepare_scheduled_task(db,input);
 }
